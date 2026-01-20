@@ -2,7 +2,8 @@
 use crate::config::AppConfig;
 use crate::grpc::service::MySbcService;
 use crate::tls::load_server_tls_config;
-use anyhow::{Context, Result, anyhow};
+use crate::sip::server::SipServer;
+use anyhow::{Context, Result}; // DÜZELTME: 'anyhow' makrosu kaldırıldı
 use sentiric_contracts::sentiric::sip::v1::sbc_service_server::SbcServiceServer;
 use std::convert::Infallible;
 use std::env;
@@ -52,14 +53,20 @@ impl App {
             "🚀 Servis başlatılıyor..."
         );
         
-        // TODO: gRPC Client'ları (Proxy) burada başlatılacaktır.
-
         Ok(Self { config })
     }
 
     pub async fn run(self) -> Result<()> {
         let (shutdown_tx, mut shutdown_rx) = mpsc::channel(1);
+        let (sip_shutdown_tx, sip_shutdown_rx) = mpsc::channel(1);
         let (http_shutdown_tx, http_shutdown_rx) = tokio::sync::oneshot::channel();
+
+        // --- SIP Sunucusunu Başlat ---
+        let sip_config = self.config.clone();
+        let sip_server = SipServer::new(sip_config).await?;
+        let sip_handle = tokio::spawn(async move {
+            sip_server.run(sip_shutdown_rx).await;
+        });
 
         // --- gRPC Sunucusunu Başlat ---
         let grpc_config = self.config.clone();
@@ -111,11 +118,15 @@ impl App {
             res = http_server_handle => {
                 res.context("HTTP sunucu görevi panic'ledi")?; 
             },
+            res = sip_handle => {
+                 res.context("SIP sunucu görevi panic'ledi")?;
+            },
             _ = ctrl_c => {},
         }
 
         warn!("Kapatma sinyali alındı. Graceful shutdown başlatılıyor...");
         let _ = shutdown_tx.send(()).await;
+        let _ = sip_shutdown_tx.send(()).await;
         let _ = http_shutdown_tx.send(());
         
         info!("Servis başarıyla durduruldu.");

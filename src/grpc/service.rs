@@ -17,11 +17,11 @@ impl SbcService for MySbcService {
         request: Request<GetRouteRequest>,
     ) -> Result<Response<GetRouteResponse>, Status> {
         info!("GetRoute RPC isteği alındı. SIP paketi analiz ediliyor...");
-        let req = request.into_inner(); 
+        let _req = request.into_inner(); // DÜZELTME: Unused variable fix
         
         // SBC sadece paketi kontrol eder ve yönlendirme kararını verir.
         // Şimdilik her şeye izin veriyoruz ve Proxy'ye yönlendiriyoruz.
-        let next_hop_uri = "sentiric-proxy-service:12071".to_string();
+        let next_hop_uri = "sentiric-proxy-service:5060".to_string();
 
         Ok(Response::new(GetRouteResponse {
             allow: true,

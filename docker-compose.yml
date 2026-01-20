@@ -41,6 +41,9 @@ services:
       - SBC_SERVICE_SIP_PORT=13094
       - SBC_SERVICE_HOST=sbc-service
 
+      # --- Proxy Service
+      - PROXY_SERVICE_SIP_TARGET=proxy-service:13074
+
       # --- Security
       - GRPC_TLS_CA_PATH=/sentiric-certificates/certs/ca.crt
       - SBC_SERVICE_CERT_PATH=/sentiric-certificates/certs/sbc-service-chain.crt
@@ -57,6 +60,7 @@ services:
       - "${SBC_SERVICE_HTTP_PORT:-13090}:${SBC_SERVICE_HTTP_PORT:-13090}"
       - "${SBC_SERVICE_GRPC_PORT:-13091}:${SBC_SERVICE_GRPC_PORT:-13091}"
       - "${SBC_SERVICE_METRICS_PORT:-13092}:${SBC_SERVICE_METRICS_PORT:-13092}"
+
       - "${SBC_SERVICE_SIP_PORT:-13094}:${SBC_SERVICE_SIP_PORT:-13094}/udp"
       - "${SBC_SERVICE_SIP_PORT:-13094}:${SBC_SERVICE_SIP_PORT:-13094}/tcp"
 

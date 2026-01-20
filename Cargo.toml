@@ -1,6 +1,6 @@
 [package]
 name = "sentiric-sbc-service"
-version = "0.1.0"
+version = "1.0.0"
 edition = "2021"
 
 [dependencies]
@@ -14,11 +14,12 @@ anyhow = "1.0"
 thiserror = "1.0"
 hyper = { version = "0.14.28", features = ["full"] } 
 config = "0.14" 
-
-# SIP İşleme/Ayrıştırma (Hafif)
 regex = "1"
 once_cell = "1.19"
-# --- KRİTİK BAĞIMLILIK ---
+
+# CORE DEPENDENCY
+sentiric-sip-core = { git = "https://github.com/sentiric/sentiric-sip-core.git", tag = "v1.2.0" }
+
 [dependencies.sentiric-contracts]
 git = "https://github.com/sentiric/sentiric-contracts.git"
-tag = "v1.9.0"
+tag = "v1.13.3"
