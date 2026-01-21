@@ -6,6 +6,7 @@ use tracing::{error, info, warn};
 use sentiric_sip_core::{SipTransport, parser};
 use crate::config::AppConfig;
 use crate::sip::engine::{SbcEngine, SipAction};
+use tokio::net::lookup_host; // DÜZELTME: DNS lookup için eklendi
 
 pub struct SipServer {
     config: Arc<AppConfig>,
@@ -39,8 +40,6 @@ impl SipServer {
                     break;
                 }
                 
-                // SipTransport yerine raw socket kullanıyoruz çünkü performansı manuel yöneteceğiz
-                // ve sip-core parser'ı ile entegre edeceğiz.
                 res = socket.recv_from(&mut buf) => {
                     match res {
                         Ok((len, src_addr)) => {
@@ -60,23 +59,28 @@ impl SipServer {
                                             self.engine.sanitize(&mut packet);
                                             
                                             // 4. Forward to Proxy
-                                            // Orijinal paketi (veya sanitize edilmiş halini) proxy'ye ilet.
-                                            // NOT: Şimdilik orijinal byte'ları gönderiyoruz, 
-                                            // sanitize edilmiş byte'ları oluşturmak (re-serialize) maliyetli olabilir.
-                                            // Ancak gerçek bir SBC'de packet.to_bytes() kullanılmalıdır.
-                                            
                                             let forward_data = packet.to_bytes(); 
                                             
-                                            if let Err(e) = self.transport.send(&forward_data, self.config.proxy_sip_addr).await {
-                                                error!("Failed to forward packet to Proxy: {}", e);
-                                            } else {
-                                                // debug!("Forwarded {} bytes to Proxy", forward_data.len());
+                                            // DÜZELTME: Hostname'i IP'ye çözümle ve gönder
+                                            match lookup_host(&self.config.proxy_sip_addr).await {
+                                                Ok(mut addrs) => {
+                                                    if let Some(target_socket_addr) = addrs.next() {
+                                                        if let Err(e) = self.transport.send(&forward_data, target_socket_addr).await {
+                                                            error!("Failed to forward packet to Proxy ({}): {}", target_socket_addr, e);
+                                                        }
+                                                    } else {
+                                                        error!("DNS Resolution failed: No address found for {}", self.config.proxy_sip_addr);
+                                                    }
+                                                },
+                                                Err(e) => {
+                                                    error!("DNS Resolution error for {}: {}", self.config.proxy_sip_addr, e);
+                                                }
                                             }
                                         }
                                     }
                                 },
                                 Err(e) => {
-                                    warn!("Malfromed SIP packet from {}: {}", src_addr, e);
+                                    warn!("Malformed SIP packet from {}: {}", src_addr, e);
                                 }
                             }
                         },

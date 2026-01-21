@@ -13,7 +13,9 @@ pub struct AppConfig {
     pub sip_port: u16,
     
     // Routing Targets
-    pub proxy_sip_addr: SocketAddr, // UDP Forwarding Target
+    // DÜZELTME: SocketAddr yerine String kullanıyoruz.
+    // Docker/K8s ortamında buraya "proxy-service:5060" gibi hostname gelebilir.
+    pub proxy_sip_addr: String, 
     
     pub env: String,
     pub rust_log: String,
@@ -39,9 +41,9 @@ impl AppConfig {
         let http_addr: SocketAddr = format!("[::]:{}", http_port).parse()?;
         
         // Proxy Service SIP Adresi (UDP Forwarding için)
-        // Örn: "proxy-service:5060" veya "10.88.30.7:5060"
-        let proxy_target = env::var("PROXY_SERVICE_SIP_TARGET").context("ZORUNLU: PROXY_SERVICE_SIP_TARGET eksik (örn: 10.88.30.7:5060)")?;
-        let proxy_sock_addr: SocketAddr = proxy_target.parse().context("Geçersiz Proxy SIP Adresi")?;
+        // DÜZELTME: parse() kaldırıldı. String olarak alınıyor.
+        let proxy_target = env::var("PROXY_SERVICE_SIP_TARGET")
+            .context("ZORUNLU: PROXY_SERVICE_SIP_TARGET eksik (örn: proxy-service:5060)")?;
 
         Ok(AppConfig {
             grpc_listen_addr: grpc_addr,
@@ -50,7 +52,7 @@ impl AppConfig {
             sip_bind_ip: "0.0.0.0".to_string(),
             sip_port,
             
-            proxy_sip_addr: proxy_sock_addr,
+            proxy_sip_addr: proxy_target,
 
             env: env::var("ENV").unwrap_or_else(|_| "production".to_string()),
             rust_log: env::var("RUST_LOG").unwrap_or_else(|_| "info".to_string()),
