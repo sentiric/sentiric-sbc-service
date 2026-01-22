@@ -44,6 +44,11 @@ services:
       # --- Proxy Service
       - PROXY_SERVICE_SIP_TARGET=proxy-service:13074
 
+      # EKLENDİ: Public IP (Via başlığına yazılacak)
+      # Leader makinesinin Public IP'si buraya gelmeli.
+      # Docker Compose'da bu değişken genelde .env dosyasından gelir.
+      - SBC_SERVICE_PUBLIC_IP=${TOPOLOGY_LEADER_PUBLIC_IP} 
+      
       # --- Security
       - GRPC_TLS_CA_PATH=/sentiric-certificates/certs/ca.crt
       - SBC_SERVICE_CERT_PATH=/sentiric-certificates/certs/sbc-service-chain.crt

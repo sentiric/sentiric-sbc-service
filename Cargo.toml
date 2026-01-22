@@ -1,6 +1,6 @@
 [package]
 name = "sentiric-sbc-service"
-version = "1.0.0"
+version = "1.0.1" # Versiyonu artırdık
 edition = "2021"
 
 [dependencies]
@@ -16,6 +16,8 @@ hyper = { version = "0.14.28", features = ["full"] }
 config = "0.14" 
 regex = "1"
 once_cell = "1.19"
+# EKLENDİ: Random sayı üretimi için
+rand = "0.8" 
 
 # CORE DEPENDENCY
 sentiric-sip-core = { git = "https://github.com/sentiric/sentiric-sip-core.git", tag = "v1.2.0" }
