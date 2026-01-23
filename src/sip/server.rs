@@ -60,6 +60,9 @@ impl SipServer {
 
     async fn handle_forwarding(&self, mut packet: SipPacket, src_addr: SocketAddr) {
         let target_addr = if packet.is_request {
+            // --- KRİTİK DEĞİŞİKLİK BAŞLANGICI ---
+            // Gelen paketin en üstteki Via başlığına 'received' ve 'rport' ekle.
+            // Bu, proxy'nin yanıtı doğru yere (SBC'nin arkasındaki NAT'lanmış adrese) göndermesini sağlar.
             if let Some(via_header) = packet.headers.iter_mut().find(|h| h.name == HeaderName::Via) {
                 if !via_header.value.contains("received=") {
                     via_header.value.push_str(&format!(";received={}", src_addr.ip()));
@@ -68,9 +71,11 @@ impl SipServer {
                      via_header.value.push_str(&format!(";rport={}", src_addr.port()));
                 }
             }
+            // --- KRİTİK DEĞİŞİKLİK SONU ---
 
             match self.resolve_proxy_addr().await {
                 Some(addr) => {
+                    // SBC, kendi Via başlığını ekleyerek Proxy'ye "yanıtı bana gönder" der.
                     let via_val = format!("SIP/2.0/UDP {}:{};branch=z9hG4bK-sbc-{}", 
                         self.config.sip_public_ip, 
                         self.config.sip_port,
@@ -84,14 +89,17 @@ impl SipServer {
                 },
                 None => None,
             }
-        } else {
+        } else { // Response handling
+            // Proxy'den gelen yanıtın en üstündeki Via (SBC'nin kendi eklediği) başlığını kaldır.
             if !packet.headers.is_empty() && packet.headers[0].name == HeaderName::Via {
                 packet.headers.remove(0);
             }
+            // Artık en üstteki Via, orijinal istemcinin Via'sıdır.
             if let Some(client_via) = packet.headers.iter().find(|h| h.name == HeaderName::Via) {
+                // Bu Via'daki rport/received bilgilerine göre yanıtı doğru yere gönder.
                 self.parse_via_address(&client_via.value)
             } else {
-                warn!("Response packet missing Via header");
+                warn!("Response packet missing Via header after stripping SBC Via.");
                 None
             }
         };
