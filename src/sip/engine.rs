@@ -1,7 +1,8 @@
 // sentiric-sbc-service/src/sip/engine.rs
 
 use sentiric_sip_core::{SipPacket, HeaderName};
-use tracing::{warn, info, debug};
+// DÜZELTME: 'debug' makrosu tekrar eklendi.
+use tracing::{warn, debug}; 
 
 pub enum SipAction {
     Forward,

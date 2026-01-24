@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 use tokio::sync::mpsc;
-use tracing::{error, info, warn}; // 'debug' kaldırıldı
+use tracing::{error, info, warn};
 use sentiric_sip_core::{SipTransport, parser, SipPacket, HeaderName};
 use crate::config::AppConfig;
 use crate::sip::engine::{SbcEngine, SipAction};
@@ -60,10 +60,11 @@ impl SipServer {
 
     async fn handle_forwarding(&self, mut packet: SipPacket, src_addr: SocketAddr) {
         let target_addr = if packet.is_request {
-            // --- KRİTİK DEĞİŞİKLİK BAŞLANGICI ---
+            // --- NAT TRAVERSAL FIX ---
             // Gelen paketin en üstteki Via başlığına 'received' ve 'rport' ekle.
             // Bu, proxy'nin yanıtı doğru yere (SBC'nin arkasındaki NAT'lanmış adrese) göndermesini sağlar.
             if let Some(via_header) = packet.headers.iter_mut().find(|h| h.name == HeaderName::Via) {
+                // Eğer zaten varsa ekleme yapma (Loop veya Re-invite durumlarında)
                 if !via_header.value.contains("received=") {
                     via_header.value.push_str(&format!(";received={}", src_addr.ip()));
                 }
@@ -71,8 +72,7 @@ impl SipServer {
                      via_header.value.push_str(&format!(";rport={}", src_addr.port()));
                 }
             }
-            // --- KRİTİK DEĞİŞİKLİK SONU ---
-
+            
             match self.resolve_proxy_addr().await {
                 Some(addr) => {
                     // SBC, kendi Via başlığını ekleyerek Proxy'ye "yanıtı bana gönder" der.
@@ -122,35 +122,34 @@ impl SipServer {
         }
     }
     
-    // [FIX] Borrow checker hatası çözüldü
     fn parse_via_address(&self, via_val: &str) -> Option<SocketAddr> {
         let parts: Vec<&str> = via_val.split_whitespace().collect();
         if parts.len() < 2 { return None; }
         
-        let mut host_part = parts[1].split(';').next()?.to_string();
+        let protocol_part = parts[1];
+        let params: Vec<&str> = protocol_part.split(';').collect();
+        let mut host_part = params[0].to_string(); // Varsayılan host:port
         
-        // Ödünç alma sorununu çözmek için geçici değişkenler kullan
-        let (temp_host, temp_port) = if let Some((h, p)) = host_part.rsplit_once(':') {
-            (h.to_string(), p.to_string())
-        } else {
-            (host_part, "5060".to_string())
-        };
+        let mut rport: Option<String> = None;
+        let mut received: Option<String> = None;
 
-        let mut host_str = temp_host;
-        let mut port_str = temp_port;
-
-        for param in via_val.split(';') {
-            let p_trim = param.trim();
+        for param in &params[1..] {
+             let p_trim = param.trim();
             if let Some((k, v)) = p_trim.split_once('=') {
-                if k == "received" {
-                    host_str = v.to_string();
-                }
-                if k == "rport" {
-                    port_str = v.to_string();
-                }
+                if k == "received" { received = Some(v.to_string()); }
+                if k == "rport" { rport = Some(v.to_string()); }
             }
         }
 
-        format!("{}:{}", host_str, port_str).parse().ok()
+        // Eğer rport ve received varsa, onları kullan (NAT gerçeği)
+        if let (Some(r), Some(rec)) = (rport, received) {
+            return format!("{}:{}", rec, r).parse().ok();
+        }
+
+        // Yoksa header'daki host:port'u parse et
+        if !host_part.contains(':') {
+             host_part = format!("{}:5060", host_part);
+        }
+        host_part.parse().ok()
     }
 }
