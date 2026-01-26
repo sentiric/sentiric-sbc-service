@@ -1,27 +1,22 @@
-# 🔒 Sentiric SBC Service - Mantık ve Akış Mimarisi
+# 🔒 Sentiric SBC Service - Mantık Mimarisi (Final)
 
-**Stratejik Rol:** Harici SIP trafiğini analiz ederek, yönlendirme ve güvenlik kararı veren ilk savunma hattı.
+**Rol:** Gümrük Kapısı. İlk temas noktası ve Güvenlik Duvarı.
 
----
+## 1. Paket İşleme Hattı (Pipeline)
 
-## 1. SIP Yönlendirme ve Güvenlik Akışı (GetRoute)
+UDP 5060 portuna gelen her paket şu filtreden geçer:
 
-```mermaid
-sequenceDiagram
-    participant SIPGateway as SIP Gateway
-    participant SBC as SBC Service
-    participant Proxy as Proxy Service
-    
-    SIPGateway->>SBC: GetRoute(raw_sip_message, source_ip)
-    
-    Note over SBC: 1. Güvenlik Kontrolü (ACL, Frekans)
-    alt SIP Paketi Temiz ve Geçerli mi?
-        Note over SBC: 2. Protokol Normaleştirme
-        SBC->>Proxy: GetNextHop(normalized_uri) (gRPC)
-        Proxy-->>SBC: NextHop_URI
-        
-        SBC-->>SIPGateway: GetRouteResponse(allow: true, next_hop_uri)
-    else Paketin formatı bozuk veya engellenmeli
-        SBC-->>SIPGateway: GetRouteResponse(allow: false, next_hop_uri: nil)
-    end
-```
+1.  **Güvenlik (Sanitization):**
+    *   `User-Agent` kontrolü (SipVicious, FriendlyScanner engelleme).
+    *   `Max-Forwards` kontrolü (Döngü engelleme).
+
+2.  **NAT Düzeltme (Traversal Fix):**
+    *   Gelen paketin `Via` başlığına `rport` ve `received` parametrelerini ekler. (Böylece Proxy cevabı nereye döneceğini bilir).
+    *   Kendi Public IP'sini `Record-Route` olarak ekler.
+
+3.  **Yönlendirme (Next Hop):**
+    *   Temizlenmiş paketi iç ağdaki `proxy-service`'e iletir.
+
+## 2. Kritik Kural
+
+SBC asla **Business Logic** (Veritabanı sorgusu, Kullanıcı kontrolü) yapmaz. Sadece paketin "Teknik Olarak" düzgün ve güvenli olup olmadığına bakar.
