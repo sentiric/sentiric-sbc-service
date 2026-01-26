@@ -41,15 +41,13 @@ services:
       - SBC_SERVICE_SIP_PORT=13094
       - SBC_SERVICE_HOST=sbc-service
 
-      # --- Proxy Service
-      - PROXY_SERVICE_SIP_TARGET=proxy-service:13074
+      # --- Proxy Service (DEĞİŞTİ: SIP hedefi yerine gRPC hedefi)
+      - PROXY_SERVICE_GRPC_TARGET=https://proxy-service:13071
 
-      # EKLENDİ: Public IP (Via başlığına yazılacak)
-      # Leader makinesinin Public IP'si buraya gelmeli.
-      # Docker Compose'da bu değişken genelde .env dosyasından gelir.
-      - SBC_SERVICE_PUBLIC_IP=${TOPOLOGY_LEADER_PUBLIC_IP} 
+      # --- Public IP (Via başlığına yazılacak)
+      - SBC_SERVICE_PUBLIC_IP=${TOPOLOGY_LEADER_PUBLIC_IP}
       
-      # --- Security
+      # --- Security (mTLS için istemci kimliği de sunucu kimliğiyle aynı varsayıldı)
       - GRPC_TLS_CA_PATH=/sentiric-certificates/certs/ca.crt
       - SBC_SERVICE_CERT_PATH=/sentiric-certificates/certs/sbc-service-chain.crt
       - SBC_SERVICE_KEY_PATH=/sentiric-certificates/certs/sbc-service.key
@@ -75,6 +73,5 @@ services:
       timeout: 5s
       retries: 5
       
-    # depends_on:     
-    #   # Uygulama Servisleri -> Sadece 'started' olmaları yeterli     
-    #   proxy-service: { condition: service_started }
+    depends_on:     
+      proxy-service: { condition: service_healthy }

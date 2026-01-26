@@ -1,10 +1,12 @@
 // sentiric-sbc-service/src/sip/server.rs
 
 use std::sync::Arc;
-use tokio::sync::mpsc;
-use tracing::{error, info, warn};
-use sentiric_sip_core::{SipTransport, parser, SipPacket, HeaderName, Header}; // Header eklendi
+use tokio::sync::{mpsc, Mutex};
+use tonic::transport::Channel;
+use tracing::{debug, error, info, instrument, warn};
+use sentiric_sip_core::{SipTransport, parser, SipPacket, HeaderName, Header};
 use crate::config::AppConfig;
+use sentiric_contracts::sentiric::sip::v1::{proxy_service_client::ProxyServiceClient, GetNextHopRequest};
 use crate::sip::engine::{SbcEngine, SipAction};
 use tokio::net::lookup_host;
 use std::net::SocketAddr;
@@ -13,16 +15,21 @@ pub struct SipServer {
     config: Arc<AppConfig>,
     transport: Arc<SipTransport>,
     engine: SbcEngine,
+    proxy_client: Arc<Mutex<ProxyServiceClient<Channel>>>,
 }
 
 impl SipServer {
-    pub async fn new(config: Arc<AppConfig>) -> anyhow::Result<Self> {
+    pub async fn new(
+        config: Arc<AppConfig>,
+        proxy_client: Arc<Mutex<ProxyServiceClient<Channel>>>,
+    ) -> anyhow::Result<Self> {
         let bind_addr = format!("{}:{}", config.sip_bind_ip, config.sip_port);
         let transport = SipTransport::new(&bind_addr).await?;
         Ok(Self {
             config,
             transport: Arc::new(transport),
             engine: SbcEngine::new(),
+            proxy_client,
         })
     }
 
@@ -58,6 +65,14 @@ impl SipServer {
         }
     }
 
+    #[instrument(
+        skip(self, packet), 
+        fields(
+            sip.method = %packet.method, 
+            // DÜZELTME: `unwrap_or` yerine `map_or` kullanılarak tip uyuşmazlığı giderildi.
+            sip.call_id = %packet.get_header_value(HeaderName::CallId).map_or("", |v| v.as_str())
+        )
+    )]
     async fn handle_forwarding(&self, mut packet: SipPacket, src_addr: SocketAddr) {
         let target_addr = if packet.is_request {
             // --- NAT TRAVERSAL FIX ---
@@ -71,28 +86,44 @@ impl SipServer {
             }
             
             // --- RECORD-ROUTE INJECTION (SBC) ---
-            // SBC, kendi Public IP'sini (varsa) veya erişilebilir IP'sini Record-Route'a ekler.
-            // Bu, ACK ve BYE mesajlarının SBC üzerinden geçmesini garanti eder.
-            // lr (loose routing) parametresi kritik.
             let rr_val = format!("<sip:{}:{};lr>", self.config.sip_public_ip, self.config.sip_port);
             packet.headers.insert(0, Header::new(HeaderName::RecordRoute, rr_val));
-            // ------------------------------------
 
-            match self.resolve_proxy_addr().await {
-                Some(addr) => {
+            // --- DYNAMIC ROUTING via gRPC ---
+            let req_uri = packet.uri.clone();
+            debug!(request_uri = %req_uri, "Proxy'den yönlendirme kararı isteniyor...");
+
+            let request = tonic::Request::new(GetNextHopRequest {
+                destination_uri: req_uri,
+                source_ip: src_addr.ip().to_string(),
+            });
+
+            let response = match self.proxy_client.lock().await.get_next_hop(request).await {
+                Ok(res) => Some(res.into_inner()),
+                Err(e) => {
+                    error!("Proxy Service'e gRPC çağrısı başarısız: {}", e);
+                    return; // Hata durumunda paketi düşür
+                }
+            };
+            
+            match response {
+                Some(res) => {
                     let via_val = format!("SIP/2.0/UDP {}:{};branch=z9hG4bK-sbc-{}", 
-                        self.config.sip_public_ip, // veya container IP
+                        self.config.sip_public_ip,
                         self.config.sip_port,
                         rand::random::<u32>()
                     );
                     packet.headers.insert(0, Header::new(HeaderName::Via, via_val));
-                    Some(addr)
+                    self.resolve_address(&res.uri).await
                 },
-                None => None,
+                None => {
+                    error!("Proxy Service'den yanıt alınamadı.");
+                    None
+                }
             }
         } else { // Response handling
             if !packet.headers.is_empty() && packet.headers[0].name == HeaderName::Via {
-                packet.headers.remove(0);
+                packet.headers.remove(0); // Kendi Via başlığımızı kaldır
             }
             if let Some(client_via) = packet.headers.iter().find(|h| h.name == HeaderName::Via) {
                 self.parse_via_address(&client_via.value)
@@ -110,11 +141,11 @@ impl SipServer {
         }
     }
 
-    async fn resolve_proxy_addr(&self) -> Option<SocketAddr> {
-         match lookup_host(&self.config.proxy_sip_addr).await {
+    async fn resolve_address(&self, address: &str) -> Option<SocketAddr> {
+         match lookup_host(address).await {
             Ok(mut addrs) => addrs.next(),
             Err(e) => {
-                error!("DNS Resolution error for {}: {}", self.config.proxy_sip_addr, e);
+                error!("DNS Resolution error for target {}: {}", address, e);
                 None
             }
         }

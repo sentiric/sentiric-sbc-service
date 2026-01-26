@@ -1,15 +1,17 @@
 // sentiric-sbc-service/src/app.rs
 use crate::config::AppConfig;
+use crate::grpc::client::ProxyClient;
 use crate::grpc::service::MySbcService;
-use crate::tls::load_server_tls_config;
 use crate::sip::server::SipServer;
-use anyhow::{Context, Result}; // DÜZELTME: 'anyhow' makrosu kaldırıldı
+use crate::tls::load_server_tls_config;
+use anyhow::{Context, Result};
+// DEĞİŞTİ: Artık harici kütüphaneden geliyor.
 use sentiric_contracts::sentiric::sip::v1::sbc_service_server::SbcServiceServer;
 use std::convert::Infallible;
 use std::env;
 use std::sync::Arc;
 use tokio::sync::mpsc;
-use tonic::transport::Server as GrpcServer; 
+use tonic::transport::Server as GrpcServer;
 use tracing::{error, info, warn};
 use tracing_subscriber::{fmt, prelude::*, EnvFilter, Registry};
 use hyper::{
@@ -61,9 +63,14 @@ impl App {
         let (sip_shutdown_tx, sip_shutdown_rx) = mpsc::channel(1);
         let (http_shutdown_tx, http_shutdown_rx) = tokio::sync::oneshot::channel();
 
+        // --- gRPC İstemcisini Başlat (Proxy Service'e) ---
+        let proxy_client = ProxyClient::connect(self.config.clone())
+            .await
+            .context("Proxy Service gRPC istemcisi başlatılamadı")?;
+
         // --- SIP Sunucusunu Başlat ---
         let sip_config = self.config.clone();
-        let sip_server = SipServer::new(sip_config).await?;
+        let sip_server = SipServer::new(sip_config, proxy_client).await?;
         let sip_handle = tokio::spawn(async move {
             sip_server.run(sip_shutdown_rx).await;
         });
@@ -72,7 +79,7 @@ impl App {
         let grpc_config = self.config.clone();
         let grpc_server_handle = tokio::spawn(async move {
             let tls_config = load_server_tls_config(&grpc_config).await.expect("TLS yapılandırması başarısız");
-            let grpc_service = MySbcService {}; 
+            let grpc_service = MySbcService {};
             
             info!(address = %grpc_config.grpc_listen_addr, "Güvenli gRPC sunucusu dinlemeye başlıyor...");
             

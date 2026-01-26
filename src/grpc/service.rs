@@ -1,4 +1,5 @@
 // sentiric-sbc-service/src/grpc/service.rs
+// DEĞİŞTİ: Artık harici kütüphaneden geliyor.
 use sentiric_contracts::sentiric::sip::v1::{
     sbc_service_server::SbcService,
     GetRouteRequest, GetRouteResponse,
@@ -17,11 +18,12 @@ impl SbcService for MySbcService {
         request: Request<GetRouteRequest>,
     ) -> Result<Response<GetRouteResponse>, Status> {
         info!("GetRoute RPC isteği alındı. SIP paketi analiz ediliyor...");
-        let _req = request.into_inner(); // DÜZELTME: Unused variable fix
+        let _req = request.into_inner();
         
-        // SBC sadece paketi kontrol eder ve yönlendirme kararını verir.
-        // Şimdilik her şeye izin veriyoruz ve Proxy'ye yönlendiriyoruz.
-        let next_hop_uri = "sentiric-proxy-service:5060".to_string();
+        // Bu RPC, platformun dışından gelen (örn: sip-gateway) bir isteği işler.
+        // Bu mantık, SIP sunucusunun proxy-service'e yaptığı dahili çağrıdan farklıdır.
+        // Şimdilik pasif bırakılmıştır.
+        let next_hop_uri = "proxy-service:13094".to_string();
 
         Ok(Response::new(GetRouteResponse {
             allow: true,

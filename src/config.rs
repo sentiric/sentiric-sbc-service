@@ -11,11 +11,10 @@ pub struct AppConfig {
     // SIP Network
     pub sip_bind_ip: String,
     pub sip_port: u16,
-    // EKLENDİ: Public IP (Via başlığı için)
     pub sip_public_ip: String,
     
-    // Routing Targets
-    pub proxy_sip_addr: String, 
+    // Routing Targets (DEĞİŞTİ: Artık gRPC adresi)
+    pub proxy_grpc_addr: String, 
     
     pub env: String,
     pub rust_log: String,
@@ -38,10 +37,9 @@ impl AppConfig {
         let grpc_addr: SocketAddr = format!("[::]:{}", grpc_port).parse()?;
         let http_addr: SocketAddr = format!("[::]:{}", http_port).parse()?;
         
-        let proxy_target = env::var("PROXY_SERVICE_SIP_TARGET")
-            .context("ZORUNLU: PROXY_SERVICE_SIP_TARGET eksik (örn: proxy-service:13074)")?;
+        let proxy_target = env::var("PROXY_SERVICE_GRPC_TARGET")
+            .context("ZORUNLU: PROXY_SERVICE_GRPC_TARGET eksik (örn: https://proxy-service:13071)")?;
 
-        // EKLENDİ: Public IP Okuma (Varsayılan olarak bind IP'si)
         let public_ip = env::var("SBC_SERVICE_PUBLIC_IP").unwrap_or_else(|_| "127.0.0.1".to_string());
 
         Ok(AppConfig {
@@ -50,9 +48,9 @@ impl AppConfig {
             
             sip_bind_ip: "0.0.0.0".to_string(),
             sip_port,
-            sip_public_ip: public_ip, // EKLENDİ
+            sip_public_ip: public_ip,
             
-            proxy_sip_addr: proxy_target,
+            proxy_grpc_addr: proxy_target,
 
             env: env::var("ENV").unwrap_or_else(|_| "production".to_string()),
             rust_log: env::var("RUST_LOG").unwrap_or_else(|_| "info".to_string()),
