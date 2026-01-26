@@ -3,7 +3,7 @@
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tracing::{error, info, warn};
-use sentiric_sip_core::{SipTransport, parser, SipPacket, HeaderName};
+use sentiric_sip_core::{SipTransport, parser, SipPacket, HeaderName, Header}; // Header eklendi
 use crate::config::AppConfig;
 use crate::sip::engine::{SbcEngine, SipAction};
 use tokio::net::lookup_host;
@@ -61,10 +61,7 @@ impl SipServer {
     async fn handle_forwarding(&self, mut packet: SipPacket, src_addr: SocketAddr) {
         let target_addr = if packet.is_request {
             // --- NAT TRAVERSAL FIX ---
-            // Gelen paketin en üstteki Via başlığına 'received' ve 'rport' ekle.
-            // Bu, proxy'nin yanıtı doğru yere (SBC'nin arkasındaki NAT'lanmış adrese) göndermesini sağlar.
             if let Some(via_header) = packet.headers.iter_mut().find(|h| h.name == HeaderName::Via) {
-                // Eğer zaten varsa ekleme yapma (Loop veya Re-invite durumlarında)
                 if !via_header.value.contains("received=") {
                     via_header.value.push_str(&format!(";received={}", src_addr.ip()));
                 }
@@ -73,30 +70,31 @@ impl SipServer {
                 }
             }
             
+            // --- RECORD-ROUTE INJECTION (SBC) ---
+            // SBC, kendi Public IP'sini (varsa) veya erişilebilir IP'sini Record-Route'a ekler.
+            // Bu, ACK ve BYE mesajlarının SBC üzerinden geçmesini garanti eder.
+            // lr (loose routing) parametresi kritik.
+            let rr_val = format!("<sip:{}:{};lr>", self.config.sip_public_ip, self.config.sip_port);
+            packet.headers.insert(0, Header::new(HeaderName::RecordRoute, rr_val));
+            // ------------------------------------
+
             match self.resolve_proxy_addr().await {
                 Some(addr) => {
-                    // SBC, kendi Via başlığını ekleyerek Proxy'ye "yanıtı bana gönder" der.
                     let via_val = format!("SIP/2.0/UDP {}:{};branch=z9hG4bK-sbc-{}", 
-                        self.config.sip_public_ip, 
+                        self.config.sip_public_ip, // veya container IP
                         self.config.sip_port,
                         rand::random::<u32>()
                     );
-                    packet.headers.insert(0, sentiric_sip_core::Header::new(
-                        HeaderName::Via, 
-                        via_val
-                    ));
+                    packet.headers.insert(0, Header::new(HeaderName::Via, via_val));
                     Some(addr)
                 },
                 None => None,
             }
         } else { // Response handling
-            // Proxy'den gelen yanıtın en üstündeki Via (SBC'nin kendi eklediği) başlığını kaldır.
             if !packet.headers.is_empty() && packet.headers[0].name == HeaderName::Via {
                 packet.headers.remove(0);
             }
-            // Artık en üstteki Via, orijinal istemcinin Via'sıdır.
             if let Some(client_via) = packet.headers.iter().find(|h| h.name == HeaderName::Via) {
-                // Bu Via'daki rport/received bilgilerine göre yanıtı doğru yere gönder.
                 self.parse_via_address(&client_via.value)
             } else {
                 warn!("Response packet missing Via header after stripping SBC Via.");
@@ -128,7 +126,7 @@ impl SipServer {
         
         let protocol_part = parts[1];
         let params: Vec<&str> = protocol_part.split(';').collect();
-        let mut host_part = params[0].to_string(); // Varsayılan host:port
+        let mut host_part = params[0].to_string(); 
         
         let mut rport: Option<String> = None;
         let mut received: Option<String> = None;
@@ -141,12 +139,10 @@ impl SipServer {
             }
         }
 
-        // Eğer rport ve received varsa, onları kullan (NAT gerçeği)
         if let (Some(r), Some(rec)) = (rport, received) {
             return format!("{}:{}", rec, r).parse().ok();
         }
 
-        // Yoksa header'daki host:port'u parse et
         if !host_part.contains(':') {
              host_part = format!("{}:5060", host_part);
         }
