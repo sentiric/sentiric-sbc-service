@@ -63,9 +63,9 @@ services:
       - "${SBC_SERVICE_HTTP_PORT:-13090}:${SBC_SERVICE_HTTP_PORT:-13090}"
       - "${SBC_SERVICE_GRPC_PORT:-13091}:${SBC_SERVICE_GRPC_PORT:-13091}"
       - "${SBC_SERVICE_METRICS_PORT:-13092}:${SBC_SERVICE_METRICS_PORT:-13092}"
-
-      - "${SBC_SERVICE_SIP_PORT:-13094}:${SBC_SERVICE_SIP_PORT:-13094}/udp"
-      - "${SBC_SERVICE_SIP_PORT:-13094}:${SBC_SERVICE_SIP_PORT:-13094}/tcp"
+      
+      - "5060:13094/udp"
+      - "5060:13094/tcp"
 
     healthcheck:
       test: [ "CMD", "nc", "-z", "localhost", "${SBC_SERVICE_GRPC_PORT:-13091}" ]

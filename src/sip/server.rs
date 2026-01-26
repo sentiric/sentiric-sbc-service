@@ -11,6 +11,9 @@ use crate::sip::engine::{SbcEngine, SipAction};
 use tokio::net::lookup_host;
 use std::net::SocketAddr;
 
+// YENİ: RFC 3261 standardını temsil eden sabit.
+const DEFAULT_SIP_PORT: u16 = 5060;
+
 pub struct SipServer {
     config: Arc<AppConfig>,
     transport: Arc<SipTransport>,
@@ -69,11 +72,20 @@ impl SipServer {
         skip(self, packet), 
         fields(
             sip.method = %packet.method, 
-            // DÜZELTME: `unwrap_or` yerine `map_or` kullanılarak tip uyuşmazlığı giderildi.
             sip.call_id = %packet.get_header_value(HeaderName::CallId).map_or("", |v| v.as_str())
         )
     )]
     async fn handle_forwarding(&self, mut packet: SipPacket, src_addr: SocketAddr) {
+        // GÖREV ORCH-01: Gelişmiş Başlık Loglaması
+        debug!(
+            source = %src_addr,
+            sip.request_uri = %packet.uri,
+            sip.from = %packet.get_header_value(HeaderName::From).map_or("", |v| v.as_str()),
+            sip.to = %packet.get_header_value(HeaderName::To).map_or("", |v| v.as_str()),
+            sip.cseq = %packet.get_header_value(HeaderName::CSeq).map_or("", |v| v.as_str()),
+            "Gelen SIP paketi işleniyor"
+        );
+
         let target_addr = if packet.is_request {
             // --- NAT TRAVERSAL FIX ---
             if let Some(via_header) = packet.headers.iter_mut().find(|h| h.name == HeaderName::Via) {
@@ -91,10 +103,9 @@ impl SipServer {
 
             // --- DYNAMIC ROUTING via gRPC ---
             let req_uri = packet.uri.clone();
-            debug!(request_uri = %req_uri, "Proxy'den yönlendirme kararı isteniyor...");
-
+            
             let request = tonic::Request::new(GetNextHopRequest {
-                destination_uri: req_uri,
+                destination_uri: req_uri.clone(),
                 source_ip: src_addr.ip().to_string(),
             });
 
@@ -102,7 +113,7 @@ impl SipServer {
                 Ok(res) => Some(res.into_inner()),
                 Err(e) => {
                     error!("Proxy Service'e gRPC çağrısı başarısız: {}", e);
-                    return; // Hata durumunda paketi düşür
+                    return;
                 }
             };
             
@@ -117,13 +128,13 @@ impl SipServer {
                     self.resolve_address(&res.uri).await
                 },
                 None => {
-                    error!("Proxy Service'den yanıt alınamadı.");
+                    error!("Proxy Service'den yönlendirme hedefi alınamadı.");
                     None
                 }
             }
         } else { // Response handling
             if !packet.headers.is_empty() && packet.headers[0].name == HeaderName::Via {
-                packet.headers.remove(0); // Kendi Via başlığımızı kaldır
+                packet.headers.remove(0);
             }
             if let Some(client_via) = packet.headers.iter().find(|h| h.name == HeaderName::Via) {
                 self.parse_via_address(&client_via.value)
@@ -135,6 +146,7 @@ impl SipServer {
 
         if let Some(target) = target_addr {
             let data = packet.to_bytes();
+            debug!(target = %target, "SIP paketi yönlendiriliyor");
             if let Err(e) = self.transport.send(&data, target).await {
                 error!("Failed to forward packet to {}: {}", target, e);
             }
@@ -175,7 +187,8 @@ impl SipServer {
         }
 
         if !host_part.contains(':') {
-             host_part = format!("{}:5060", host_part);
+             // DÜZELTME: Hardcoded 5060 yerine sabit kullanılıyor.
+             host_part = format!("{}:{}", host_part, DEFAULT_SIP_PORT);
         }
         host_part.parse().ok()
     }
