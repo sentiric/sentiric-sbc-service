@@ -17,6 +17,12 @@ impl SbcEngine {
 
     /// Gelen paketi inceler ve ne yapılacağına karar verir.
     pub fn inspect(&self, packet: &SipPacket) -> SipAction {
+        // 0. [YENİ] Yanıtlara (Response) izin ver
+        // SBC yanıtları geri döndürmek zorundadır. Via kontrolü server.rs içinde yapılıyor.
+        if !packet.is_request {
+            return SipAction::Forward;
+        }
+
         // 1. [YENİ] User-Agent Güvenlik Kontrolü
         if let Some(ua) = packet.get_header_value(HeaderName::UserAgent) {
             let ua_lower = ua.to_lowercase();
@@ -31,9 +37,8 @@ impl SbcEngine {
         }
 
         // 2. Metod Kontrolü
-        // Sadece desteklediğimiz metodlara izin ver
-        match packet.method {
-            // İzin verilenler
+        match &packet.method {
+            // İzin verilen standart metodlar
             sentiric_sip_core::Method::Invite |
             sentiric_sip_core::Method::Ack |
             sentiric_sip_core::Method::Bye |
@@ -41,12 +46,15 @@ impl SbcEngine {
             sentiric_sip_core::Method::Register |
             sentiric_sip_core::Method::Options => {},
             
-            // Diğerleri (SUBSCRIBE, NOTIFY, PUBLISH vb.) şimdilik gereksiz
-            _ => {
-                debug!("🚫 BLOCKED: Unsupported Method: {:?}", packet.method);
-                // Burada Drop yerine 405 Method Not Allowed dönmek daha RFC uyumlu olabilir
-                // ama SBC mantığında sessizce düşürmek (Stealth) de bir seçenektir.
-                return SipAction::Drop;
+            // Diğer metodlar (String olarak parse edilenler)
+            sentiric_sip_core::Method::Other(m) => {
+                match m.as_str() {
+                    "MESSAGE" | "SUBSCRIBE" | "NOTIFY" | "REFER" | "INFO" | "PRACK" | "UPDATE" => {},
+                    _ => {
+                        warn!("🚫 BLOCKED: Unsupported Method: {:?}", packet.method);
+                        return SipAction::Drop;
+                    }
+                }
             }
         }
 
