@@ -84,10 +84,25 @@ impl SipServer {
         let target_addr = if packet.is_request {
             // --- REQUEST HANDLING (AYNI) ---
             if let Some(via_header) = packet.headers.iter_mut().find(|h| h.name == HeaderName::Via) {
+                // FIXED: Handle existing 'rport' flag (RFC 3581) to avoid ";rport;rport=..."
+                let has_rport_value = via_header.value.contains("rport=");
+                let has_rport_flag = via_header.value.contains(";rport"); // could match inside "rport=..." too, but simplified check
+
                 if !via_header.value.contains("received=") {
                     via_header.value.push_str(&format!(";received={}", src_addr.ip()));
                 }
-                if !via_header.value.contains("rport=") {
+
+                if has_rport_value {
+                    // Valid rport=port exists, do nothing or update? 
+                    // Usually we trust the client if they sent a value (e.g. Relayed),
+                    // but for NAT traversal we should ideally overwrite it with the source port.
+                    // For safety in this fix, we will LEAVE IT if it has a value.
+                } else if has_rport_flag {
+                     // Has ";rport" or "rport" without value. Replace it!
+                     // We use a simple replacement, assuming standard formatting.
+                     via_header.value = via_header.value.replace(";rport", &format!(";rport={}", src_addr.port()));
+                } else {
+                     // Neither flag nor value. Append it.
                      via_header.value.push_str(&format!(";rport={}", src_addr.port()));
                 }
             }
