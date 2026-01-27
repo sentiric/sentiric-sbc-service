@@ -11,7 +11,6 @@ use crate::sip::engine::{SbcEngine, SipAction};
 use tokio::net::lookup_host;
 use std::net::SocketAddr;
 
-// YENİ: RFC 3261 standardını temsil eden sabit.
 const DEFAULT_SIP_PORT: u16 = 5060;
 
 pub struct SipServer {
@@ -76,13 +75,9 @@ impl SipServer {
         )
     )]
     async fn handle_forwarding(&self, mut packet: SipPacket, src_addr: SocketAddr) {
-        // GÖREV ORCH-01: Gelişmiş Başlık Loglaması
         debug!(
             source = %src_addr,
             sip.request_uri = %packet.uri,
-            sip.from = %packet.get_header_value(HeaderName::From).map_or("", |v| v.as_str()),
-            sip.to = %packet.get_header_value(HeaderName::To).map_or("", |v| v.as_str()),
-            sip.cseq = %packet.get_header_value(HeaderName::CSeq).map_or("", |v| v.as_str()),
             "Gelen SIP paketi işleniyor"
         );
 
@@ -104,9 +99,13 @@ impl SipServer {
             // --- DYNAMIC ROUTING via gRPC ---
             let req_uri = packet.uri.clone();
             
+            // [YENİ] Metodu String'e çevir ve Request'e ekle
+            let method_str = packet.method.to_string(); 
+
             let request = tonic::Request::new(GetNextHopRequest {
                 destination_uri: req_uri.clone(),
                 source_ip: src_addr.ip().to_string(),
+                method: method_str, // [EKLENDİ]
             });
 
             let response = match self.proxy_client.lock().await.get_next_hop(request).await {
@@ -119,6 +118,7 @@ impl SipServer {
             
             match response {
                 Some(res) => {
+                    // Kendi Via başlığımızı ekleyip hedefi çözüyoruz
                     let via_val = format!("SIP/2.0/UDP {}:{};branch=z9hG4bK-sbc-{}", 
                         self.config.sip_public_ip,
                         self.config.sip_port,
@@ -132,7 +132,8 @@ impl SipServer {
                     None
                 }
             }
-        } else { // Response handling
+        } else { 
+            // Response handling (Değişmedi)
             if !packet.headers.is_empty() && packet.headers[0].name == HeaderName::Via {
                 packet.headers.remove(0);
             }
@@ -187,7 +188,6 @@ impl SipServer {
         }
 
         if !host_part.contains(':') {
-             // DÜZELTME: Hardcoded 5060 yerine sabit kullanılıyor.
              host_part = format!("{}:{}", host_part, DEFAULT_SIP_PORT);
         }
         host_part.parse().ok()
