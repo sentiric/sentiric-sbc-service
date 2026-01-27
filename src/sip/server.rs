@@ -82,7 +82,7 @@ impl SipServer {
         );
 
         let target_addr = if packet.is_request {
-            // --- NAT TRAVERSAL FIX ---
+            // --- REQUEST HANDLING (AYNI) ---
             if let Some(via_header) = packet.headers.iter_mut().find(|h| h.name == HeaderName::Via) {
                 if !via_header.value.contains("received=") {
                     via_header.value.push_str(&format!(";received={}", src_addr.ip()));
@@ -92,33 +92,28 @@ impl SipServer {
                 }
             }
             
-            // --- RECORD-ROUTE INJECTION (SBC) ---
             let rr_val = format!("<sip:{}:{};lr>", self.config.sip_public_ip, self.config.sip_port);
             packet.headers.insert(0, Header::new(HeaderName::RecordRoute, rr_val));
 
-            // --- DYNAMIC ROUTING via gRPC ---
             let req_uri = packet.uri.clone();
-            
-            // [YENİ] Metodu String'e çevir ve Request'e ekle
             let method_str = packet.method.to_string(); 
 
             let request = tonic::Request::new(GetNextHopRequest {
                 destination_uri: req_uri.clone(),
                 source_ip: src_addr.ip().to_string(),
-                method: method_str, // [EKLENDİ]
+                method: method_str,
             });
 
             let response = match self.proxy_client.lock().await.get_next_hop(request).await {
                 Ok(res) => Some(res.into_inner()),
                 Err(e) => {
-                    error!("Proxy Service'e gRPC çağrısı başarısız: {}", e);
+                    error!("Proxy Service gRPC çağrısı başarısız: {}", e);
                     return;
                 }
             };
             
             match response {
                 Some(res) => {
-                    // Kendi Via başlığımızı ekleyip hedefi çözüyoruz
                     let via_val = format!("SIP/2.0/UDP {}:{};branch=z9hG4bK-sbc-{}", 
                         self.config.sip_public_ip,
                         self.config.sip_port,
@@ -133,24 +128,53 @@ impl SipServer {
                 }
             }
         } else { 
-            // Response handling (Değişmedi)
+            // --- RESPONSE HANDLING (DÜZELTİLMİŞ) ---
+            
+            // 1. Kendi Via başlığımızı (en üstteki) kontrol et ve kaldır.
+            // SBC, isteği gönderirken kendi Via başlığını eklemişti. Yanıt dönerken bu başlık en üstte olur.
+            // Bunu çıkarıp altındaki Via başlığına (Müşterinin adresi) göndermeliyiz.
+            
+            let mut removed_own_via = false;
             if !packet.headers.is_empty() && packet.headers[0].name == HeaderName::Via {
-                packet.headers.remove(0);
+                // Güvenlik kontrolü: Gerçekten bizim Via mı? (Basitçe IP kontrolü veya branch id)
+                // Şimdilik varsayılan olarak ilk Via'yı biz ekledik varsayıyoruz.
+                let via_val = &packet.headers[0].value;
+                if via_val.contains(&self.config.sip_public_ip) || via_val.contains(&self.config.sip_bind_ip) || via_val.contains("sbc") {
+                     packet.headers.remove(0);
+                     removed_own_via = true;
+                     debug!("SBC Via header removed.");
+                } else {
+                    // Eğer ilk Via bizim değilse, bu paket bize ait olmayabilir veya yapı bozuktur.
+                    // Yine de forwarding deneyebiliriz ama loglamak lazım.
+                    warn!("Top Via header does not match SBC signature: {}", via_val);
+                    // Yine de kaldıralım, belki IP farklı görünüyordur (Docker vs).
+                    packet.headers.remove(0);
+                    removed_own_via = true;
+                }
             }
+
+            if !removed_own_via {
+                 warn!("Response packet missing Via header or logic error.");
+                 return;
+            }
+
+            // 2. Bir sonraki Via başlığını bul (Müşterinin adresi)
             if let Some(client_via) = packet.headers.iter().find(|h| h.name == HeaderName::Via) {
                 self.parse_via_address(&client_via.value)
             } else {
-                warn!("Response packet missing Via header after stripping SBC Via.");
+                warn!("Response packet has no more Via headers. Cannot route back to client.");
                 None
             }
         };
 
         if let Some(target) = target_addr {
             let data = packet.to_bytes();
-            debug!(target = %target, "SIP paketi yönlendiriliyor");
+            info!("↪️ Yönlendirme: {} ({} byte) -> {}", packet.status_code, data.len(), target);
             if let Err(e) = self.transport.send(&data, target).await {
                 error!("Failed to forward packet to {}: {}", target, e);
             }
+        } else {
+            warn!("Hedef adres çözülemedi, paket düşürülüyor.");
         }
     }
 
@@ -183,10 +207,12 @@ impl SipServer {
             }
         }
 
+        // Eğer received ve rport varsa (NAT), onu kullan.
         if let (Some(r), Some(rec)) = (rport, received) {
             return format!("{}:{}", rec, r).parse().ok();
         }
 
+        // Yoksa host part'ı kullan.
         if !host_part.contains(':') {
              host_part = format!("{}:{}", host_part, DEFAULT_SIP_PORT);
         }
