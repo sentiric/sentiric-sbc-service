@@ -49,7 +49,7 @@ impl SbcEngine {
             // Diğer metodlar (String olarak parse edilenler)
             sentiric_sip_core::Method::Other(m) => {
                 match m.as_str() {
-                    "MESSAGE" | "SUBSCRIBE" | "NOTIFY" | "REFER" | "INFO" | "PRACK" | "UPDATE" => {},
+                    "MESSAGE" | "SUBSCRIBE" | "NOTIFY" | "REFER" | "INFO" | "PRACK" | "UPDATE" | "PUBLISH" => {},
                     _ => {
                         warn!("🚫 BLOCKED: Unsupported Method: {:?}", packet.method);
                         return SipAction::Drop;
