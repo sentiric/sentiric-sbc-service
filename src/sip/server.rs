@@ -49,6 +49,12 @@ impl SipServer {
                 res = socket.recv_from(&mut buf) => {
                     match res {
                         Ok((len, src_addr)) => {
+                            // Keep-Alive Filtresi
+                            if len < 4 || buf[..len].iter().all(|&b| b == b'\r' || b == b'\n' || b == 0) {
+                                debug!("💤 Keep-Alive packet ignored from {}", src_addr);
+                                continue;
+                            }
+
                             let data = &buf[..len];
                             match parser::parse(data) {
                                 Ok(packet) => {
@@ -57,7 +63,9 @@ impl SipServer {
                                         SipAction::Drop => warn!("Packet dropped from {}", src_addr),
                                     }
                                 },
-                                Err(e) => if len > 4 { warn!("Malformed SIP: {}", e); }
+                                Err(e) => {
+                                     warn!("Malformed SIP from {}: {}", src_addr, e); 
+                                }
                             }
                         },
                         Err(e) => error!("UDP Error: {}", e),
@@ -82,28 +90,20 @@ impl SipServer {
         );
 
         let target_addr = if packet.is_request {
-            // --- REQUEST HANDLING (AYNI) ---
             if let Some(via_header) = packet.headers.iter_mut().find(|h| h.name == HeaderName::Via) {
-                // FIXED: Handle existing 'rport' flag (RFC 3581) to avoid ";rport;rport=..."
                 let has_rport_value = via_header.value.contains("rport=");
-                let has_rport_flag = via_header.value.contains(";rport"); // could match inside "rport=..." too, but simplified check
+                let has_rport_flag = via_header.value.contains(";rport");
 
                 if !via_header.value.contains("received=") {
                     via_header.value.push_str(&format!(";received={}", src_addr.ip()));
                 }
 
-                if has_rport_value {
-                    // Valid rport=port exists, do nothing or update? 
-                    // Usually we trust the client if they sent a value (e.g. Relayed),
-                    // but for NAT traversal we should ideally overwrite it with the source port.
-                    // For safety in this fix, we will LEAVE IT if it has a value.
-                } else if has_rport_flag {
-                     // Has ";rport" or "rport" without value. Replace it!
-                     // We use a simple replacement, assuming standard formatting.
-                     via_header.value = via_header.value.replace(";rport", &format!(";rport={}", src_addr.port()));
-                } else {
-                     // Neither flag nor value. Append it.
-                     via_header.value.push_str(&format!(";rport={}", src_addr.port()));
+                if !has_rport_value {
+                    if has_rport_flag {
+                         via_header.value = via_header.value.replace(";rport", &format!(";rport={}", src_addr.port()));
+                    } else {
+                         via_header.value.push_str(&format!(";rport={}", src_addr.port()));
+                    }
                 }
             }
             
@@ -143,29 +143,13 @@ impl SipServer {
                 }
             }
         } else { 
-            // --- RESPONSE HANDLING (DÜZELTİLMİŞ) ---
-            
-            // 1. Kendi Via başlığımızı (en üstteki) kontrol et ve kaldır.
-            // SBC, isteği gönderirken kendi Via başlığını eklemişti. Yanıt dönerken bu başlık en üstte olur.
-            // Bunu çıkarıp altındaki Via başlığına (Müşterinin adresi) göndermeliyiz.
-            
             let mut removed_own_via = false;
             if !packet.headers.is_empty() && packet.headers[0].name == HeaderName::Via {
-                // Güvenlik kontrolü: Gerçekten bizim Via mı? (Basitçe IP kontrolü veya branch id)
-                // Şimdilik varsayılan olarak ilk Via'yı biz ekledik varsayıyoruz.
-                let via_val = &packet.headers[0].value;
-                if via_val.contains(&self.config.sip_public_ip) || via_val.contains(&self.config.sip_bind_ip) || via_val.contains("sbc") {
-                     packet.headers.remove(0);
-                     removed_own_via = true;
-                     debug!("SBC Via header removed.");
-                } else {
-                    // Eğer ilk Via bizim değilse, bu paket bize ait olmayabilir veya yapı bozuktur.
-                    // Yine de forwarding deneyebiliriz ama loglamak lazım.
-                    warn!("Top Via header does not match SBC signature: {}", via_val);
-                    // Yine de kaldıralım, belki IP farklı görünüyordur (Docker vs).
-                    packet.headers.remove(0);
-                    removed_own_via = true;
-                }
+                // FIX: Önce klonla, sonra sil.
+                let via_val_clone = packet.headers[0].value.clone();
+                packet.headers.remove(0);
+                removed_own_via = true;
+                debug!("SBC Via header removed via index. Original: {}", via_val_clone);
             }
 
             if !removed_own_via {
@@ -173,7 +157,6 @@ impl SipServer {
                  return;
             }
 
-            // 2. Bir sonraki Via başlığını bul (Müşterinin adresi)
             if let Some(client_via) = packet.headers.iter().find(|h| h.name == HeaderName::Via) {
                 self.parse_via_address(&client_via.value)
             } else {
@@ -222,12 +205,10 @@ impl SipServer {
             }
         }
 
-        // Eğer received ve rport varsa (NAT), onu kullan.
         if let (Some(r), Some(rec)) = (rport, received) {
             return format!("{}:{}", rec, r).parse().ok();
         }
 
-        // Yoksa host part'ı kullan.
         if !host_part.contains(':') {
              host_part = format!("{}:{}", host_part, DEFAULT_SIP_PORT);
         }
