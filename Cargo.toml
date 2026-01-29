@@ -19,7 +19,4 @@ once_cell = "1.19"
 rand = "0.8"
 
 sentiric-sip-core = { git = "https://github.com/sentiric/sentiric-sip-core.git", tag = "v1.2.11" }
-
-[dependencies.sentiric-contracts]
-git = "https://github.com/sentiric/sentiric-contracts.git"
-tag = "v1.13.6" # En son versiyona güncellendi
+sentiric-contracts = { git = "https://github.com/sentiric/sentiric-contracts.git", tag = "v1.13.6" }
