@@ -8,19 +8,21 @@ pub struct AppConfig {
     pub grpc_listen_addr: SocketAddr,
     pub http_listen_addr: SocketAddr,
     
-    // SIP Network
     pub sip_bind_ip: String,
     pub sip_port: u16,
-    pub sip_public_ip: String,
+    pub sip_public_ip: String, // Public IP (34.122...)
+    pub sip_internal_ip: String, // Internal/Tailscale IP (100.67...)
     
-    // Routing Targets (DEĞİŞTİ: Artık gRPC adresi)
     pub proxy_grpc_addr: String, 
+    
+    // RTP Relay Settings
+    pub rtp_start_port: u16,
+    pub rtp_end_port: u16,
     
     pub env: String,
     pub rust_log: String,
     pub service_version: String,
     
-    // TLS Yolları
     pub cert_path: String,
     pub key_path: String,
     pub ca_path: String,
@@ -38,9 +40,17 @@ impl AppConfig {
         let http_addr: SocketAddr = format!("[::]:{}", http_port).parse()?;
         
         let proxy_target = env::var("PROXY_SERVICE_GRPC_TARGET")
-            .context("ZORUNLU: PROXY_SERVICE_GRPC_TARGET eksik (örn: https://proxy-service:13071)")?;
+            .context("ZORUNLU: PROXY_SERVICE_GRPC_TARGET eksik")?;
 
         let public_ip = env::var("SBC_SERVICE_PUBLIC_IP").unwrap_or_else(|_| "127.0.0.1".to_string());
+        
+        // Tailscale IP'si (UAS buna RTP atacak)
+        let internal_ip = env::var("SBC_SERVICE_INTERNAL_IP")
+            .or_else(|_| env::var("NODE_IP"))
+            .unwrap_or_else(|_| "127.0.0.1".to_string());
+
+        let rtp_start = env::var("SBC_RTP_START_PORT").unwrap_or_else(|_| "20000".to_string()).parse()?;
+        let rtp_end = env::var("SBC_RTP_END_PORT").unwrap_or_else(|_| "21000".to_string()).parse()?;
 
         Ok(AppConfig {
             grpc_listen_addr: grpc_addr,
@@ -49,16 +59,20 @@ impl AppConfig {
             sip_bind_ip: "0.0.0.0".to_string(),
             sip_port,
             sip_public_ip: public_ip,
+            sip_internal_ip: internal_ip,
             
             proxy_grpc_addr: proxy_target,
+            
+            rtp_start_port: rtp_start,
+            rtp_end_port: rtp_end,
 
             env: env::var("ENV").unwrap_or_else(|_| "production".to_string()),
             rust_log: env::var("RUST_LOG").unwrap_or_else(|_| "info".to_string()),
             service_version: env::var("SERVICE_VERSION").unwrap_or_else(|_| "1.0.0".to_string()),
             
-            cert_path: env::var("SBC_SERVICE_CERT_PATH").context("ZORUNLU: SBC_SERVICE_CERT_PATH eksik")?,
-            key_path: env::var("SBC_SERVICE_KEY_PATH").context("ZORUNLU: SBC_SERVICE_KEY_PATH eksik")?,
-            ca_path: env::var("GRPC_TLS_CA_PATH").context("ZORUNLU: GRPC_TLS_CA_PATH eksik")?,
+            cert_path: env::var("SBC_SERVICE_CERT_PATH").context("ZORUNLU: SBC_SERVICE_CERT_PATH")?,
+            key_path: env::var("SBC_SERVICE_KEY_PATH").context("ZORUNLU: SBC_SERVICE_KEY_PATH")?,
+            ca_path: env::var("GRPC_TLS_CA_PATH").context("ZORUNLU: GRPC_TLS_CA_PATH")?,
         })
     }
 }
