@@ -1,7 +1,8 @@
 // sentiric-sbc-service/src/sip/security.rs
 
 use dashmap::DashMap;
-use governor::{Quota, RateLimiter, Jitter};
+// DÜZELTME: Jitter kaldırıldı
+use governor::{Quota, RateLimiter}; 
 use governor::state::{InMemoryState, NotKeyed};
 use governor::clock::DefaultClock;
 use std::net::IpAddr;
