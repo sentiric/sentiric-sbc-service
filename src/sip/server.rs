@@ -4,7 +4,7 @@ use std::sync::Arc;
 use tokio::sync::{mpsc, Mutex};
 use tonic::transport::Channel;
 use tracing::{debug, error, info, instrument, warn};
-use sentiric_sip_core::{SipTransport, parser, SipPacket, HeaderName, Header};
+use sentiric_sip_core::{SipTransport, parser, SipPacket, HeaderName, Header, utils as sip_utils};
 use crate::config::AppConfig;
 use sentiric_contracts::sentiric::sip::v1::{proxy_service_client::ProxyServiceClient, GetNextHopRequest};
 use crate::sip::engine::{SbcEngine, SipAction};
@@ -104,15 +104,23 @@ impl SipServer {
             let rr_val = format!("<sip:{}:{};lr>", self.config.sip_public_ip, self.config.sip_port);
             packet.headers.insert(0, Header::new(HeaderName::RecordRoute, rr_val));
 
-            let req_uri = packet.uri.clone();
+            // --- KRİTİK DÜZELTME BAŞLANGICI ---
+            // Request-URI yerine, To header'ındaki AOR adresini kullanıyoruz.
+            // Bu, ACK ve BYE mesajlarında 'Request-URI' Contact adresi (IP) olsa bile
+            // Proxy'nin '9998' kullanıcısını (To) görüp doğru yönlendirme yapmasını sağlar.
             
-            info!("🔫 [TRACE-SBC] Proxy'e Soruluyor: {}", req_uri);
+            let to_header_val = packet.get_header_value(HeaderName::To).cloned().unwrap_or_default();
+            // AOR extract (tag vb. temizle) -> sip:9998@domain
+            let routing_destination = sip_utils::extract_aor(&to_header_val);
+            
+            info!("🔫 [TRACE-SBC] Proxy'e Soruluyor (Via To-Header): {}", routing_destination);
 
             let request = tonic::Request::new(GetNextHopRequest {
-                destination_uri: req_uri.clone(),
+                destination_uri: routing_destination, // Düzeltilmiş URI
                 source_ip: src_addr.ip().to_string(),
                 method: method.clone(),
             });
+            // --- KRİTİK DÜZELTME SONU ---
 
             match self.proxy_client.lock().await.get_next_hop(request).await {
                 Ok(res) => {
@@ -124,7 +132,6 @@ impl SipServer {
                     );
                     packet.headers.insert(0, Header::new(HeaderName::Via, via_val));
                     
-                    // --- DÜZELTME: next_hop_uri -> uri ---
                     let uri = r.uri;
                     if !uri.is_empty() {
                          info!("🔫 [TRACE-SBC] Proxy Yanıtı: Next Hop URI: {}", uri);
