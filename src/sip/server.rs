@@ -49,7 +49,6 @@ impl SipServer {
                 res = socket.recv_from(&mut buf) => {
                     match res {
                         Ok((len, src_addr)) => {
-                            // Keep-Alive (CRLF) filtresi
                             if len < 4 || buf[..len].iter().all(|&b| b == b'\r' || b == b'\n' || b == 0) {
                                 continue;
                             }
@@ -57,9 +56,10 @@ impl SipServer {
                             let data = &buf[..len];
                             match parser::parse(data) {
                                 Ok(packet) => {
+                                    // Security Engine kontrolü
                                     match self.engine.inspect(&packet, src_addr) {
                                         SipAction::Forward => self.handle_forwarding(packet, src_addr).await,
-                                        SipAction::Drop => { /* Sessizce düşür */ },
+                                        SipAction::Drop => { /* Drop logu engine içinde */ },
                                     }
                                 },
                                 Err(e) => {
@@ -79,32 +79,38 @@ impl SipServer {
         let method = packet.method.to_string();
         
         let target_addr = if packet.is_request {
-            // --- INBOUND REQUEST PROCESSING ---
+            // --- INBOUND REQUEST PROCESSING (INVITE, BYE from Operator) ---
             
             // 1. NAT Fix: Via header manipülasyonu
             if let Some(via_header) = packet.headers.iter_mut().find(|h| h.name == HeaderName::Via) {
-                // received=IP ekle
                 if !via_header.value.contains("received=") {
                     via_header.value.push_str(&format!(";received={}", src_addr.ip()));
                 }
-                // rport ekle veya güncelle
-                if via_header.value.contains(";rport") && !via_header.value.contains("rport=") {
-                     via_header.value = via_header.value.replace(";rport", &format!(";rport={}", src_addr.port()));
-                } else if !via_header.value.contains("rport=") {
+                if !via_header.value.contains("rport=") {
                      via_header.value.push_str(&format!(";rport={}", src_addr.port()));
                 }
             }
             
-            // 2. Topology Hiding: Record-Route ekle
-            // SBC kendi IP'sini ekler ki yanıtlar ve sonraki istekler (ACK, BYE) yine SBC üzerinden geçsin.
+            // 2. Topology Hiding & Routing Guarantee: Record-Route ekle
+            // Bu kritik: İstemci (Operator/Baresip) sonraki istekleri (BYE) nereye atacağını buradan öğrenir.
+            // lr=true (loose routing) önemli.
             let rr_val = format!("<sip:{}:{};lr>", self.config.sip_public_ip, self.config.sip_port);
-            packet.headers.insert(0, Header::new(HeaderName::RecordRoute, rr_val));
+            
+            // Record-Route sadece Dialog başlatan isteklerde (INVITE) eklenmelidir.
+            if method == "INVITE" {
+                // Varsa en başa ekle, yoksa oluştur
+                packet.headers.insert(0, Header::new(HeaderName::RecordRoute, rr_val));
+                debug!("📝 [SBC] Record-Route injected: {}", self.config.sip_public_ip);
+            }
 
             // 3. Routing Decision (Proxy'e sor)
             let to_header_val = packet.get_header_value(HeaderName::To).cloned().unwrap_or_default();
+            
+            // KRİTİK: Eğer bu bir BYE ise ve Route header varsa, Proxy'e sormadan Route header'a göre gitmeli.
+            // Ancak şu anki mimaride Proxy stateless router olduğu için Proxy'e sormak daha güvenli.
+            
             let routing_destination = sip_utils::extract_aor(&to_header_val);
             
-            // Proxy Service gRPC çağrısı
             let request = tonic::Request::new(GetNextHopRequest {
                 destination_uri: routing_destination,
                 source_ip: src_addr.ip().to_string(),
@@ -115,7 +121,7 @@ impl SipServer {
                 Ok(res) => {
                     let r = res.into_inner();
                     
-                    // SBC kendi Via'sını ekler
+                    // SBC kendi Via'sını ekler (Geri dönüş yolu)
                     let via_val = format!("SIP/2.0/UDP {}:{};branch=z9hG4bK-sbc-{}", 
                         self.config.sip_public_ip,
                         self.config.sip_port,
@@ -124,6 +130,7 @@ impl SipServer {
                     packet.headers.insert(0, Header::new(HeaderName::Via, via_val));
                     
                     if !r.uri.is_empty() {
+                         info!("🔀 [SBC] Routing {} -> {}", method, r.uri);
                          self.resolve_address(&r.uri).await
                     } else {
                          error!("Proxy Service yönlendirme hedefi boş döndü.");
@@ -136,24 +143,18 @@ impl SipServer {
                 }
             }
         } else { 
-            // --- OUTBOUND RESPONSE PROCESSING ---
+            // --- OUTBOUND RESPONSE PROCESSING (200 OK from Internal) ---
             
             // 1. SBC'nin eklediği en üstteki Via'yı kaldır
-            let mut removed_own_via = false;
             if !packet.headers.is_empty() && packet.headers[0].name == HeaderName::Via {
-                // Opsiyonel: Kendi Via'mız mı kontrol edilebilir ama genellikle en üstteki bizimdir.
                 packet.headers.remove(0);
-                removed_own_via = true;
-            }
-
-            if !removed_own_via {
+            } else {
                  warn!("Response packet missing Via header. Dropping.");
                  return;
             }
 
             // 2. Bir sonraki Via başlığına bak (Müşterinin adresi orada yazar)
             if let Some(client_via) = packet.headers.iter().find(|h| h.name == HeaderName::Via) {
-                // Via içindeki 'received' ve 'rport' parametrelerini öncelikli kullan
                 self.parse_via_address(&client_via.value)
             } else {
                 warn!("Response packet has no destination Via header. Dropping.");
@@ -182,7 +183,6 @@ impl SipServer {
     }
     
     fn parse_via_address(&self, via_val: &str) -> Option<SocketAddr> {
-        // Örnek: SIP/2.0/UDP 1.2.3.4:5060;received=5.6.7.8;rport=12345;branch=...
         let parts: Vec<&str> = via_val.split_whitespace().collect();
         if parts.len() < 2 { return None; }
         
@@ -198,12 +198,9 @@ impl SipServer {
             if let Some((k, v)) = p_trim.split_once('=') {
                 if k == "received" { received = Some(v.to_string()); }
                 if k == "rport" { rport = Some(v.to_string()); }
-            } else if p_trim == "rport" {
-                // rport var ama değer yoksa, kaynak port kullanılır (SBC bunu buraya kadar taşımaz genellikle)
             }
         }
 
-        // Öncelik: received:rport > received:5060 > host_part
         if let (Some(rec), Some(rp)) = (received, rport) {
             return format!("{}:{}", rec, rp).parse().ok();
         }
