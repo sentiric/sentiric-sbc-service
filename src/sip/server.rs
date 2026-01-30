@@ -49,11 +49,12 @@ impl SipServer {
                 res = socket.recv_from(&mut buf) => {
                     match res {
                         Ok((len, src_addr)) => {
-                            // Keep-Alive Filtresi
                             if len < 4 || buf[..len].iter().all(|&b| b == b'\r' || b == b'\n' || b == 0) {
-                                debug!("💤 Keep-Alive packet ignored from {}", src_addr);
                                 continue;
                             }
+
+                            // [TRACE] İlk Temas
+                            info!("🔫 [TRACE-SBC] UDP Paket Geldi. Src: {} | Len: {}", src_addr, len);
 
                             let data = &buf[..len];
                             match parser::parse(data) {
@@ -75,19 +76,12 @@ impl SipServer {
         }
     }
 
-    #[instrument(
-        skip(self, packet), 
-        fields(
-            sip.method = %packet.method, 
-            sip.call_id = %packet.get_header_value(HeaderName::CallId).map_or("", |v| v.as_str())
-        )
-    )]
+    #[instrument(skip(self, packet), fields(call_id = %packet.get_header_value(HeaderName::CallId).map_or("", |v| v.as_str())))]
     async fn handle_forwarding(&self, mut packet: SipPacket, src_addr: SocketAddr) {
-        debug!(
-            source = %src_addr,
-            sip.request_uri = %packet.uri,
-            "Gelen SIP paketi işleniyor"
-        );
+        let method = packet.method.to_string();
+        let call_id = packet.get_header_value(HeaderName::CallId).cloned().unwrap_or_default();
+
+        info!("🔫 [TRACE-SBC] İşleniyor: {} | CallID: {}", method, call_id);
 
         let target_addr = if packet.is_request {
             if let Some(via_header) = packet.headers.iter_mut().find(|h| h.name == HeaderName::Via) {
@@ -111,45 +105,47 @@ impl SipServer {
             packet.headers.insert(0, Header::new(HeaderName::RecordRoute, rr_val));
 
             let req_uri = packet.uri.clone();
-            let method_str = packet.method.to_string(); 
+            
+            info!("🔫 [TRACE-SBC] Proxy'e Soruluyor: {}", req_uri);
 
             let request = tonic::Request::new(GetNextHopRequest {
                 destination_uri: req_uri.clone(),
                 source_ip: src_addr.ip().to_string(),
-                method: method_str,
+                method: method.clone(),
             });
 
-            let response = match self.proxy_client.lock().await.get_next_hop(request).await {
-                Ok(res) => Some(res.into_inner()),
-                Err(e) => {
-                    error!("Proxy Service gRPC çağrısı başarısız: {}", e);
-                    return;
-                }
-            };
-            
-            match response {
-                Some(res) => {
+            match self.proxy_client.lock().await.get_next_hop(request).await {
+                Ok(res) => {
+                    let r = res.into_inner();
                     let via_val = format!("SIP/2.0/UDP {}:{};branch=z9hG4bK-sbc-{}", 
                         self.config.sip_public_ip,
                         self.config.sip_port,
                         rand::random::<u32>()
                     );
                     packet.headers.insert(0, Header::new(HeaderName::Via, via_val));
-                    self.resolve_address(&res.uri).await
+                    
+                    // --- DÜZELTME: next_hop_uri -> uri ---
+                    let uri = r.uri;
+                    if !uri.is_empty() {
+                         info!("🔫 [TRACE-SBC] Proxy Yanıtı: Next Hop URI: {}", uri);
+                         self.resolve_address(&uri).await
+                    } else {
+                         error!("Proxy Service'den yönlendirme hedefi alınamadı (URI boş).");
+                         None
+                    }
                 },
-                None => {
-                    error!("Proxy Service'den yönlendirme hedefi alınamadı.");
+                Err(e) => {
+                    error!("Proxy Service gRPC çağrısı başarısız: {}", e);
                     None
                 }
             }
         } else { 
             let mut removed_own_via = false;
             if !packet.headers.is_empty() && packet.headers[0].name == HeaderName::Via {
-                // FIX: Önce klonla, sonra sil.
                 let via_val_clone = packet.headers[0].value.clone();
                 packet.headers.remove(0);
                 removed_own_via = true;
-                debug!("SBC Via header removed via index. Original: {}", via_val_clone);
+                debug!("SBC Via header removed. Original: {}", via_val_clone);
             }
 
             if !removed_own_via {
@@ -167,7 +163,8 @@ impl SipServer {
 
         if let Some(target) = target_addr {
             let data = packet.to_bytes();
-            info!("↪️ Yönlendirme: {} ({} byte) -> {}", packet.status_code, data.len(), target);
+            info!("🔫 [TRACE-SBC] Yönlendirme: {} ({} byte) -> {}", packet.method.to_string(), data.len(), target);
+            
             if let Err(e) = self.transport.send(&data, target).await {
                 error!("Failed to forward packet to {}: {}", target, e);
             }
@@ -178,7 +175,11 @@ impl SipServer {
 
     async fn resolve_address(&self, address: &str) -> Option<SocketAddr> {
          match lookup_host(address).await {
-            Ok(mut addrs) => addrs.next(),
+            Ok(mut addrs) => {
+                let addr = addrs.next();
+                info!("🔫 [TRACE-SBC] DNS Çözümleme: {} -> {:?}", address, addr);
+                addr
+            },
             Err(e) => {
                 error!("DNS Resolution error for target {}: {}", address, e);
                 None
