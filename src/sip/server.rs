@@ -8,8 +8,8 @@ use sentiric_sip_core::{
     SipTransport, parser, SipPacket, HeaderName, Header, 
     utils as sip_utils,
     builder as sip_builder,
-    SipRouter,           // Root'tan geliyor (lib.rs'de re-export edildi)
-    sdp::SdpManipulator  // DÜZELTME: sdp modülü altından çağrılıyor
+    SipRouter,           
+    sdp::SdpManipulator  
 };
 use crate::config::AppConfig;
 use sentiric_contracts::sentiric::sip::v1::{proxy_service_client::ProxyServiceClient, GetNextHopRequest};
@@ -35,8 +35,6 @@ impl SipServer {
     ) -> anyhow::Result<Self> {
         let bind_addr = format!("{}:{}", config.sip_bind_ip, config.sip_port);
         let transport = SipTransport::new(&bind_addr).await?;
-        
-        // RTP Engine Başlat
         let rtp_engine = Arc::new(RtpEngine::new(config.rtp_start_port, config.rtp_end_port));
 
         Ok(Self {
@@ -65,7 +63,6 @@ impl SipServer {
                     match res {
                         Ok((len, src_addr)) => {
                             if len < 4 { continue; }
-                            // Keep-Alive (CRLF) kontrolü
                             if len <= 4 && buf[..len].iter().all(|&b| b == b'\r' || b == b'\n') {
                                 continue;
                             }
@@ -106,23 +103,16 @@ impl SipServer {
                                  && packet.get_header_value(HeaderName::CSeq).map_or(false, |v| v.contains("INVITE"));
 
         if has_sdp && (method == "INVITE" || is_invite_response) {
-            
-            // 1. Yeni bir Relay Port ayır
             if let Some(relay_port) = self.rtp_engine.allocate_relay().await {
-                
-                // 2. Hangi IP'yi yazacağız?
                 let advertise_ip = if packet.is_request {
                     &self.config.sip_internal_ip 
                 } else {
                     &self.config.sip_public_ip
                 };
 
-                // 3. SDP'yi Değiştir (Kütüphaneden Gelen Fonksiyon - Düzeltilmiş path ile)
                 if let Some(new_body) = SdpManipulator::rewrite_connection_info(&packet.body, advertise_ip, relay_port) {
                     packet.body = new_body;
                     info!("🎤 [SBC-MEDIA] SDP Rewritten: Advertise {} Port {}", advertise_ip, relay_port);
-                    
-                    // Content-Length güncelle
                     packet.headers.retain(|h| h.name != HeaderName::ContentLength);
                     packet.headers.push(Header::new(HeaderName::ContentLength, packet.body.len().to_string()));
                 }
@@ -134,8 +124,6 @@ impl SipServer {
         // --- YÖNLENDİRME MANTIĞI ---
         let target_addr = if packet.is_request {
             // 1. Gelen Request
-            
-            // Via Manipülasyonu (NAT Traversal)
             if let Some(via_header) = packet.headers.iter_mut().find(|h| h.name == HeaderName::Via) {
                 if !via_header.value.contains("received=") {
                     via_header.value.push_str(&format!(";received={}", src_addr.ip()));
@@ -147,13 +135,11 @@ impl SipServer {
                 }
             }
             
-            // Record-Route Ekle (Kütüphaneden)
             if method == "INVITE" {
                 let rr = SipRouter::build_record_route(&self.config.sip_public_ip, self.config.sip_port);
                 packet.headers.insert(0, rr);
             }
 
-            // Proxy Service'e sor
             let to_header_val = packet.get_header_value(HeaderName::To).cloned().unwrap_or_default();
             let routing_destination = sip_utils::extract_aor(&to_header_val);
             
@@ -166,8 +152,6 @@ impl SipServer {
             match self.proxy_client.lock().await.get_next_hop(request).await {
                 Ok(res) => {
                     let r = res.into_inner();
-                    
-                    // KENDİ VIA BAŞLIĞIMIZI EKLİYORUZ (Builder kullanarak)
                     let via_header = sip_builder::build_via_header(
                         &self.config.sip_public_ip, 
                         self.config.sip_port, 
@@ -189,7 +173,6 @@ impl SipServer {
             }
         } else { 
             // 2. Gelen Response
-            
             if !packet.headers.is_empty() && packet.headers[0].name == HeaderName::Via {
                 packet.headers.remove(0);
             } else {
@@ -197,7 +180,7 @@ impl SipServer {
                 return; 
             }
 
-            // Kütüphane ile Yönlendirme Hedefi Çözme
+            // REFACTOR: Core fonksiyon kullanımı
             if let Some(client_via) = packet.headers.iter().find(|h| h.name == HeaderName::Via) {
                 SipRouter::resolve_response_target(&client_via.value, DEFAULT_SIP_PORT)
             } else { 
