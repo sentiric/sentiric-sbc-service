@@ -4,6 +4,7 @@ use std::sync::Arc;
 use tokio::sync::{mpsc, Mutex};
 use tonic::transport::Channel;
 use tracing::{info, error, debug, warn};
+use dashmap::DashMap; // Eklendi
 use sentiric_sip_core::{
     SipTransport, parser, SipPacket, HeaderName, Header, 
     utils as sip_utils,
@@ -25,6 +26,8 @@ pub struct SipServer {
     engine: SbcEngine,
     proxy_client: Arc<Mutex<ProxyServiceClient<Channel>>>,
     rtp_engine: Arc<RtpEngine>,
+    // YENİ: Çağrı bazlı port takibi
+    relay_sessions: Arc<DashMap<String, u16>>,
 }
 
 impl SipServer {
@@ -42,6 +45,7 @@ impl SipServer {
             engine: SbcEngine::new(),
             proxy_client,
             rtp_engine,
+            relay_sessions: Arc::new(DashMap::new()),
         })
     }
 
@@ -92,8 +96,9 @@ impl SipServer {
 
     async fn handle_forwarding(&self, mut packet: SipPacket, src_addr: SocketAddr) {
         let method = packet.method.to_string();
+        let call_id = packet.get_header_value(HeaderName::CallId).cloned().unwrap_or_default();
         
-        // --- RTP RELAY LOGIC (Man-in-the-Middle) ---
+        // --- RTP RELAY LOGIC (Sticky Port Fix) ---
         let has_sdp = packet.body.len() > 0 && 
                       packet.get_header_value(HeaderName::ContentType)
                             .map_or(false, |v| v.contains("application/sdp"));
@@ -102,9 +107,19 @@ impl SipServer {
                                  && packet.get_header_value(HeaderName::CSeq).map_or(false, |v| v.contains("INVITE"));
 
         if has_sdp && (method == "INVITE" || is_invite_response) {
-            if let Some(relay_port) = self.rtp_engine.allocate_relay().await {
-                // Request ise (Dışarıdan içeriye), Internal IP'yi advertise et.
-                // Response ise (İçeriden dışarıya), Public IP'yi advertise et.
+            // Eğer bu çağrı için zaten bir port ayrılmışsa onu bul, yoksa yeni ayır
+            let relay_port = if let Some(existing_port) = self.relay_sessions.get(&call_id) {
+                *existing_port
+            } else {
+                if let Some(port) = self.rtp_engine.allocate_relay().await {
+                    self.relay_sessions.insert(call_id.clone(), port);
+                    port
+                } else {
+                    0
+                }
+            };
+
+            if relay_port > 0 {
                 let advertise_ip = if packet.is_request {
                     &self.config.sip_internal_ip 
                 } else {
@@ -113,24 +128,27 @@ impl SipServer {
 
                 if let Some(new_body) = SdpManipulator::rewrite_connection_info(&packet.body, advertise_ip, relay_port) {
                     packet.body = new_body;
-                    info!("🎤 [SBC-MEDIA] SDP Rewritten: Advertise {} Port {}", advertise_ip, relay_port);
+                    info!(call_id = %call_id, port = relay_port, "🎤 [SBC-MEDIA] SDP Rewritten with Sticky Port");
                     packet.headers.retain(|h| h.name != HeaderName::ContentLength);
                     packet.headers.push(Header::new(HeaderName::ContentLength, packet.body.len().to_string()));
                 }
             } else {
-                error!("❌ RTP Port allocation failed! Call might drop audio.");
+                error!("❌ RTP Port allocation failed for Call-ID: {}", call_id);
+            }
+        }
+
+        // --- SESSION CLEANUP ---
+        if method == "BYE" || (packet.status_code >= 300 && method == "INVITE") {
+            if self.relay_sessions.remove(&call_id).is_some() {
+                debug!("♻️ Relay session cleaned for Call-ID: {}", call_id);
             }
         }
 
         // --- YÖNLENDİRME MANTIĞI ---
         let target_addr = if packet.is_request {
-            // 1. Gelen Request: NAT Düzeltme ve Route Ekleme
-            
-            // [REFACTOR] Core fonksiyon kullanımı: fix_nat_via
             SipRouter::fix_nat_via(&mut packet, src_addr);
             
             if method == "INVITE" {
-                // [REFACTOR] Core fonksiyon kullanımı: add_record_route
                 SipRouter::add_record_route(&mut packet, &self.config.sip_public_ip, self.config.sip_port);
             }
 
@@ -146,15 +164,11 @@ impl SipServer {
             match self.proxy_client.lock().await.get_next_hop(request).await {
                 Ok(res) => {
                     let r = res.into_inner();
-                    
-                    // [REFACTOR] Core fonksiyon kullanımı: add_via
-                    // SBC kendini via yığınına ekler
                     SipRouter::add_via(&mut packet, &self.config.sip_public_ip, self.config.sip_port, "UDP");
-                    
                     if !r.uri.is_empty() {
                          self.resolve_address(&r.uri).await
                     } else { 
-                        warn!("⚠️ Proxy service returned empty URI for destination.");
+                        warn!("⚠️ Proxy service returned empty URI.");
                         None 
                     }
                 },
@@ -164,18 +178,14 @@ impl SipServer {
                 }
             }
         } else { 
-            // 2. Gelen Response: Via stripping
-            
-            // [REFACTOR] Core fonksiyon kullanımı: strip_top_via
             if SipRouter::strip_top_via(&mut packet).is_none() {
-                warn!("⚠️ Response received but no Via header found to strip.");
+                warn!("⚠️ Response received but no Via header found.");
                 return;
             }
 
             if let Some(client_via) = packet.headers.iter().find(|h| h.name == HeaderName::Via) {
                 SipRouter::resolve_response_target(&client_via.value, DEFAULT_SIP_PORT)
             } else { 
-                warn!("⚠️ Response has no second Via header, cannot route back.");
                 None 
             }
         };
@@ -183,10 +193,8 @@ impl SipServer {
         if let Some(target) = target_addr {
             let data = packet.to_bytes();
             if let Err(e) = self.transport.send(&data, target).await {
-                error!("🔥 Failed to send forwarded packet to {}: {}", target, e);
+                error!("🔥 Failed to send to {}: {}", target, e);
             }
-        } else {
-            warn!("⚠️ No routing target found for packet. Dropping.");
         }
     }
 
