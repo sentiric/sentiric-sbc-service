@@ -1,22 +1,27 @@
-# 🔒 Sentiric SBC Service - Mantık Mimarisi (Final)
+# 🔒 Sentiric SBC Service - Mantık Mimarisi (Nihai)
 
-**Rol:** Gümrük Kapısı. İlk temas noktası ve Güvenlik Duvarı.
+**Rol:** Gümrük Kapısı. İlk temas noktası ve Medya Köprüsü (Relay).
 
-## 1. Paket İşleme Hattı (Pipeline)
+## 1. Kritik Mimari Kural: "Sticky Media Session"
+SBC, sinyalleşme (SIP) seviyesinde hafif görünse de, Medya (RTP) seviyesinde **Diyalog Duyarlı (Dialog-Aware)** olmak zorundadır.
 
-UDP 5060 portuna gelen her paket şu filtreden geçer:
+*   **VARSAYIM HATASI:** "SBC stateless çalışır" varsayımı yanlıştır.
+*   **GERÇEK:** SBC bir Medya Aracısı (Relay) olduğu için, aynı `Call-ID` ile gelen tüm paketleri (INVITE, 200 OK, ACK) hafızasında tuttuğu **aynı RTP Portu** üzerinden eşleştirmelidir. Aksi takdirde "Port Split" (Port Ayrışması) oluşur ve ses iletilemez.
 
-1.  **Güvenlik (Sanitization):**
-    *   `User-Agent` kontrolü (SipVicious, FriendlyScanner engelleme).
-    *   `Max-Forwards` kontrolü (Döngü engelleme).
+## 2. Paket İşleme Hattı (Pipeline)
 
-2.  **NAT Düzeltme (Traversal Fix):**
-    *   Gelen paketin `Via` başlığına `rport` ve `received` parametrelerini ekler. (Böylece Proxy cevabı nereye döneceğini bilir).
-    *   Kendi Public IP'sini `Record-Route` olarak ekler.
+1.  **Medya Sabitleme (Sticky Port Allocation):**
+    *   Gelen pakette SDP varsa `Call-ID` kontrol edilir.
+    *   Bu çağrı için daha önce bir port ayrılmışsa o kullanılır, yoksa yeni bir port tahsis edilir.
+    *   Bu eşleşme çağrı bitene (BYE) kadar korunur.
 
-3.  **Yönlendirme (Next Hop):**
-    *   Temizlenmiş paketi iç ağdaki `proxy-service`'e iletir.
+2.  **Güvenlik (Sanitization):**
+    *   `User-Agent` kontrolü (SipVicious vb. engelleme).
+    *   `Max-Forwards` kontrolü.
 
-## 2. Kritik Kural
+3.  **NAT Düzeltme (Traversal Fix):**
+    *   `Via` başlığına `rport` ve `received` eklenir.
+    *   SDP içindeki IP/Port bilgisi, sabitlenen Relay Portu ile değiştirilir (Rewrite).
 
-SBC asla **Business Logic** (Veritabanı sorgusu, Kullanıcı kontrolü) yapmaz. Sadece paketin "Teknik Olarak" düzgün ve güvenli olup olmadığına bakar.
+4.  **Yönlendirme (Next Hop):**
+    *   Paket `proxy-service`'e iletilir.
