@@ -7,7 +7,6 @@ use tracing::{info, error, debug, warn};
 use sentiric_sip_core::{
     SipTransport, parser, SipPacket, HeaderName, Header, 
     utils as sip_utils,
-    builder as sip_builder,
     SipRouter,           
     sdp::SdpManipulator  
 };
@@ -104,6 +103,8 @@ impl SipServer {
 
         if has_sdp && (method == "INVITE" || is_invite_response) {
             if let Some(relay_port) = self.rtp_engine.allocate_relay().await {
+                // Request ise (Dışarıdan içeriye), Internal IP'yi advertise et.
+                // Response ise (İçeriden dışarıya), Public IP'yi advertise et.
                 let advertise_ip = if packet.is_request {
                     &self.config.sip_internal_ip 
                 } else {
@@ -123,21 +124,14 @@ impl SipServer {
 
         // --- YÖNLENDİRME MANTIĞI ---
         let target_addr = if packet.is_request {
-            // 1. Gelen Request
-            if let Some(via_header) = packet.headers.iter_mut().find(|h| h.name == HeaderName::Via) {
-                if !via_header.value.contains("received=") {
-                    via_header.value.push_str(&format!(";received={}", src_addr.ip()));
-                }
-                if !via_header.value.contains("rport") { 
-                     via_header.value.push_str(&format!(";rport={}", src_addr.port()));
-                } else if !via_header.value.contains("rport=") {
-                     via_header.value = via_header.value.replace("rport", &format!("rport={}", src_addr.port()));
-                }
-            }
+            // 1. Gelen Request: NAT Düzeltme ve Route Ekleme
+            
+            // [REFACTOR] Core fonksiyon kullanımı: fix_nat_via
+            SipRouter::fix_nat_via(&mut packet, src_addr);
             
             if method == "INVITE" {
-                let rr = SipRouter::build_record_route(&self.config.sip_public_ip, self.config.sip_port);
-                packet.headers.insert(0, rr);
+                // [REFACTOR] Core fonksiyon kullanımı: add_record_route
+                SipRouter::add_record_route(&mut packet, &self.config.sip_public_ip, self.config.sip_port);
             }
 
             let to_header_val = packet.get_header_value(HeaderName::To).cloned().unwrap_or_default();
@@ -152,12 +146,10 @@ impl SipServer {
             match self.proxy_client.lock().await.get_next_hop(request).await {
                 Ok(res) => {
                     let r = res.into_inner();
-                    let via_header = sip_builder::build_via_header(
-                        &self.config.sip_public_ip, 
-                        self.config.sip_port, 
-                        "UDP"
-                    );
-                    packet.headers.insert(0, via_header);
+                    
+                    // [REFACTOR] Core fonksiyon kullanımı: add_via
+                    // SBC kendini via yığınına ekler
+                    SipRouter::add_via(&mut packet, &self.config.sip_public_ip, self.config.sip_port, "UDP");
                     
                     if !r.uri.is_empty() {
                          self.resolve_address(&r.uri).await
@@ -172,15 +164,14 @@ impl SipServer {
                 }
             }
         } else { 
-            // 2. Gelen Response
-            if !packet.headers.is_empty() && packet.headers[0].name == HeaderName::Via {
-                packet.headers.remove(0);
-            } else {
+            // 2. Gelen Response: Via stripping
+            
+            // [REFACTOR] Core fonksiyon kullanımı: strip_top_via
+            if SipRouter::strip_top_via(&mut packet).is_none() {
                 warn!("⚠️ Response received but no Via header found to strip.");
-                return; 
+                return;
             }
 
-            // REFACTOR: Core fonksiyon kullanımı
             if let Some(client_via) = packet.headers.iter().find(|h| h.name == HeaderName::Via) {
                 SipRouter::resolve_response_target(&client_via.value, DEFAULT_SIP_PORT)
             } else { 
