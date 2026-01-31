@@ -3,11 +3,11 @@
 use std::sync::Arc;
 use tokio::sync::{mpsc, Mutex};
 use tonic::transport::Channel;
-use tracing::{info, error, debug, warn, instrument};
+use tracing::{info, error, debug, warn}; // DÜZELTME: 'instrument' kaldırıldı
 use sentiric_sip_core::{
     SipTransport, parser, SipPacket, HeaderName, Header, 
     utils as sip_utils,
-    builder as sip_builder // YENİ: Builder modülü entegrasyonu
+    builder as sip_builder
 };
 use crate::config::AppConfig;
 use sentiric_contracts::sentiric::sip::v1::{proxy_service_client::ProxyServiceClient, GetNextHopRequest};

@@ -11,6 +11,9 @@ use rand::Rng;
 
 pub struct RtpRelay {
     pub local_port: u16,
+    // Bu alan drop edildiğinde 'tx' kanalı kapanır, bu da 'rx' tarafında 
+    // döngünün bitmesini sağlar. Dolayısıyla mantıksal olarak kullanılıyor.
+    #[allow(dead_code)] 
     stop_signal: tokio::sync::broadcast::Sender<()>,
 }
 
