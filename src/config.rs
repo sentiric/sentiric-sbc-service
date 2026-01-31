@@ -49,8 +49,8 @@ impl AppConfig {
             .or_else(|_| env::var("NODE_IP"))
             .unwrap_or_else(|_| "127.0.0.1".to_string());
 
-        let rtp_start = env::var("SBC_RTP_START_PORT").unwrap_or_else(|_| "20000".to_string()).parse()?;
-        let rtp_end = env::var("SBC_RTP_END_PORT").unwrap_or_else(|_| "21000".to_string()).parse()?;
+        let rtp_start = env::var("SBC_RTP_START_PORT").unwrap_or_else(|_| "30000".to_string()).parse()?;
+        let rtp_end = env::var("SBC_RTP_END_PORT").unwrap_or_else(|_| "30100".to_string()).parse()?;
 
         Ok(AppConfig {
             grpc_listen_addr: grpc_addr,
