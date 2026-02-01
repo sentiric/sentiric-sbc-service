@@ -98,6 +98,14 @@ impl SipServer {
         let method = packet.method.to_string();
         let call_id = packet.get_header_value(HeaderName::CallId).cloned().unwrap_or_default();
         
+        // --- REGISTER DURUMU ---
+        if method == "REGISTER" {
+            // Register için port ayırmıyoruz (Medya yok) ama NAT takibi için 
+            // proxy kararını bekliyoruz. Sticky port eşleşmesi burada gerekmez 
+            // ancak yönlendirme Proxy'ye kilitlenmelidir.
+            debug!(call_id, "🛂 [SBC] Register request processing.");
+        }
+                
         // --- RTP RELAY LOGIC (Sticky Port Fix) ---
         let has_sdp = packet.body.len() > 0 && 
                       packet.get_header_value(HeaderName::ContentType)
