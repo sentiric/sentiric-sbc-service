@@ -186,18 +186,24 @@ impl SipServer {
                 }
             }
         } else { 
-            // --- RESPONSE HANDLING (PROXY -> SBC -> MOBILE) ---
+            // --- RESPONSE HANDLING ---
             if SipRouter::strip_top_via(&mut packet).is_none() {
-                warn!("⚠️ Response received but no Via header found.");
                 return;
             }
 
             if let Some(client_via) = packet.headers.iter().find(|h| h.name == HeaderName::Via) {
-                // NAT rport/received parametrelerini kullanarak mobil cihazın gerçek IP'sini bulur
-                SipRouter::resolve_response_target(&client_via.value, DEFAULT_SIP_PORT)
-            } else { 
-                None 
+                if let Some(target) = SipRouter::resolve_response_target(&client_via.value, DEFAULT_SIP_PORT) {
+                    info!(
+                        call_id = %call_id,
+                        status = packet.status_code,
+                        dest = %target,
+                        "↩️ [SBC] Yanıt dış istemciye (Mobile/NAT) iletiliyor."
+                    );
+                    let data = packet.to_bytes();
+                    let _ = self.transport.send(&data, target).await;
+                }
             }
+            return;
         };
 
         if let Some(target) = target_addr {

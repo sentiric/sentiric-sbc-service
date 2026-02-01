@@ -21,5 +21,5 @@ dashmap = "5.5"
 governor = "0.6" 
 nonzero_ext = "0.3"
 
-sentiric-sip-core = { git = "https://github.com/sentiric/sentiric-sip-core.git", tag = "v1.3.2" }
+sentiric-sip-core = { git = "https://github.com/sentiric/sentiric-sip-core.git", tag = "v1.3.3" }
 sentiric-contracts = { git = "https://github.com/sentiric/sentiric-contracts.git", tag = "v1.13.6" }
