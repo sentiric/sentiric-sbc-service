@@ -1,5 +1,3 @@
-// sentiric-sbc-service/src/sip/engine.rs
-
 use sentiric_sip_core::{SipPacket, HeaderName};
 use tracing::{warn, debug};
 use std::sync::Arc;

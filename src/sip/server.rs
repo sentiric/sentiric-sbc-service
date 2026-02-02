@@ -1,5 +1,3 @@
-// sentiric-sbc-service/src/sip/server.rs
-
 use std::sync::Arc;
 use tokio::sync::{mpsc, Mutex};
 use tonic::transport::Channel;

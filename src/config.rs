@@ -1,4 +1,3 @@
-// sentiric-sbc-service/src/config.rs
 use anyhow::{Context, Result};
 use std::env;
 use std::net::SocketAddr;

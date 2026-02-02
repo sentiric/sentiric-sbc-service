@@ -1,5 +1,3 @@
-// sentiric-sbc-service/src/sip/security.rs
-
 use dashmap::DashMap;
 // DÜZELTME: Jitter kaldırıldı
 use governor::{Quota, RateLimiter}; 
