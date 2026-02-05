@@ -1,6 +1,6 @@
 [package]
 name = "sentiric-sbc-service"
-version = "1.2.0"
+version = "1.2.1"
 edition = "2021"
 
 [dependencies]
@@ -8,6 +8,9 @@ edition = "2021"
 tokio = { version = "1", features = ["full"] }
 tonic = { version = "0.11", features = ["tls", "tls-roots"] }
 prost = "0.12"
+
+# HTTP Server (Health Check)
+hyper = { version = "0.14", features = ["full"] }
 
 # Observability
 tracing = "0.1"
@@ -19,17 +22,14 @@ anyhow = "1.0"
 thiserror = "1.0"
 config = "0.14"
 rand = "0.8"
-socket2 = "0.5" # Gelişmiş soket ayarları için
+socket2 = "0.5"
 
 # State & Security
-dashmap = "5.5" # Concurrent Map
-governor = "0.6" # Rate Limiting
-nonzero_ext = "0.3" # Governor için gerekli
+dashmap = "5.5"
+governor = "0.6"
+nonzero_ext = "0.3"
 regex = "1"
 
-# HTTP (Health Check)
-hyper = { version = "0.14", features = ["full"] }
-
 # --- THE IRON CORE ---
-sentiric-sip-core = { git = "https://github.com/sentiric/sentiric-sip-core.git", tag = "v1.3.3" }
+sentiric-sip-core = { git = "https://github.com/sentiric/sentiric-sip-core.git", tag = "v1.3.4" }
 sentiric-contracts = { git = "https://github.com/sentiric/sentiric-contracts.git", tag = "v1.13.7" }
