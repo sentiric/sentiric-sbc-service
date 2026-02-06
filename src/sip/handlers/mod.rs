@@ -1,2 +1,4 @@
-// Bu dosya src/sip/handlers/mod.rs olmalıdır.
-// Şimdilik boş kalabilir veya gelecekteki handler'lar için placeholder olabilir.
+// sentiric-sbc-service/src/sip/handlers/mod.rs
+pub mod security;
+pub mod packet;
+pub mod media;
