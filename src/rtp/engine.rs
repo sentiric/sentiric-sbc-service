@@ -5,7 +5,7 @@ use tokio::net::UdpSocket;
 use dashmap::DashMap;
 use std::net::SocketAddr;
 use std::time::Duration;
-use tracing::{info, error, debug, warn};
+use tracing::{info, error, debug};
 use rand::Rng;
 
 struct RtpRelay {
@@ -80,14 +80,14 @@ impl RtpEngine {
 async fn run_relay_loop(port: u16, mut stop_signal: tokio::sync::broadcast::Receiver<()>) -> anyhow::Result<()> {
     let addr = format!("0.0.0.0:{}", port);
     let socket = UdpSocket::bind(&addr).await?;
-    let mut buf = [0u8; 4096];
+    let mut buf = [0u8; 2048];
 
-    let mut peer_external: Option<SocketAddr> = None;
-    let mut peer_internal: Option<SocketAddr> = None;
+    let mut peer_ext: Option<SocketAddr> = None;
+    let mut peer_int: Option<SocketAddr> = None;
     
     let timeout = Duration::from_secs(60); 
 
-    info!("🎤 RTP Relay Active on {}", addr);
+    info!("🎤 RTP Relay Active: {}", addr);
 
     loop {
         tokio::select! {
@@ -96,31 +96,29 @@ async fn run_relay_loop(port: u16, mut stop_signal: tokio::sync::broadcast::Rece
             res = tokio::time::timeout(timeout, socket.recv_from(&mut buf)) => {
                 match res {
                     Ok(Ok((len, src))) => {
-                        // [v2.4 MİMARİ]: Akıllı Çift Yönlü Latching
-                        // 1. Paket dışarıdan mı geliyor (Public IP)?
-                        // 2. Paket içeriden mi geliyor (Tailscale/Docker IP)?
+                        // [v2.5 MİMARİ GÜNCELLEME]: ASYMMETRIC LATCHING
+                        // 1. Eğer gelen paket peer_ext ile eşleşirse, peer_int'e gönder.
+                        // 2. Eğer gelen paket peer_int ile eşleşirse, peer_ext'e gönder.
+                        // 3. Eşleşmezse, yeni bacağı akıllıca tanı:
                         
-                        let target = if Some(src) == peer_external {
-                            peer_internal
-                        } else if Some(src) == peer_internal {
-                            peer_external
+                        let target = if Some(src) == peer_ext {
+                            peer_int
+                        } else if Some(src) == peer_int {
+                            peer_ext
                         } else {
-                            // Yeni bir peer keşfedildi.
-                            // Basit mantık: Eğer IP özel bloktaysa (10.x veya 100.x) INTERNAL'dır.
-                            let is_private = is_private_network(src.ip());
-
-                            if is_private && peer_internal.is_none() {
-                                info!("🔒 RTP Latch INTERNAL: {} on port {}", src, port);
-                                peer_internal = Some(src);
-                                peer_external
-                            } else if !is_private && peer_external.is_none() {
-                                info!("🔒 RTP Latch EXTERNAL: {} on port {}", src, port);
-                                peer_external = Some(src);
-                                peer_internal
+                            // Yeni bacak tespiti
+                            if is_private_network(src.ip()) {
+                                if peer_int.is_none() {
+                                    info!("🔒 [LATCH-INT] Internal media locked to {}", src);
+                                }
+                                peer_int = Some(src);
+                                peer_ext
                             } else {
-                                // Zaten kilitli bir bacak var ama gelen farklı, roaming olabilir.
-                                if is_private { peer_internal = Some(src); peer_external }
-                                else { peer_external = Some(src); peer_internal }
+                                if peer_ext.is_none() {
+                                    info!("🔒 [LATCH-EXT] External media locked to {}", src);
+                                }
+                                peer_ext = Some(src);
+                                peer_int
                             }
                         };
 
@@ -128,7 +126,10 @@ async fn run_relay_loop(port: u16, mut stop_signal: tokio::sync::broadcast::Rece
                             let _ = socket.send_to(&buf[..len], dst).await;
                         }
                     }
-                    _ => break,
+                    _ => {
+                        info!("💤 Port {} timed out due to silence.", port);
+                        break;
+                    }
                 }
             }
         }
@@ -136,12 +137,14 @@ async fn run_relay_loop(port: u16, mut stop_signal: tokio::sync::broadcast::Rece
     Ok(())
 }
 
-// Yardımcı fonksiyon: IP'nin iç ağda olup olmadığını kontrol eder.
 fn is_private_network(ip: std::net::IpAddr) -> bool {
     match ip {
         std::net::IpAddr::V4(ipv4) => {
-            let octets = ipv4.octets();
-            octets[0] == 10 || (octets[0] == 100 && octets[1] >= 64 && octets[1] <= 127) || (octets[0] == 172 && octets[1] >= 16 && octets[1] <= 31) || (octets[0] == 192 && octets[1] == 168)
+            let o = ipv4.octets();
+            // 10.x, 172.16-31.x, 192.168.x, 100.64-127.x (Tailscale)
+            o[0] == 10 || o[0] == 192 && o[1] == 168 || 
+            (o[0] == 172 && o[1] >= 16 && o[1] <= 31) ||
+            (o[0] == 100 && o[1] >= 64 && o[1] <= 127)
         }
         _ => false,
     }
