@@ -36,7 +36,7 @@ impl SipServer {
     }
     
     pub async fn run(self, mut shutdown_rx: mpsc::Receiver<()>) {
-        info!("📡 SBC SIP Listener Active: {}:{}", self.config.sip_bind_ip, self.config.sip_port);
+        info!("📡 SBC (Iron Core v2.2) Listener Active: {}:{}", self.config.sip_bind_ip, self.config.sip_port);
         
         let mut buf = vec![0u8; 65535];
         let socket = self.transport.get_socket();
@@ -44,7 +44,7 @@ impl SipServer {
         loop {
             tokio::select! {
                 _ = shutdown_rx.recv() => { 
-                    info!("🛑 SIP Server shutting down.");
+                    info!("🛑 SBC shut down gracefully.");
                     break; 
                 }
                 res = socket.recv_from(&mut buf) => {
@@ -55,22 +55,23 @@ impl SipServer {
 
                             match parser::parse(data) {
                                 Ok(mut packet) => {
-                                    // [v2.2 MİMARİ GÜNCELLEME]: 
-                                    // 1. INVITE gelirse anında 100 Trying gönder (Retransmission engellemek için)
+                                    // [TELEKOM STANDARDI]: 
+                                    // Paket geldiği anda, hiçbir gRPC çağrısı yapmadan 100 Trying gönder.
+                                    // Bu, istemcinin (Baresip/Operatör) timeout olmasını engeller.
                                     if packet.is_request && packet.method == sentiric_sip_core::Method::Invite {
                                         let trying = SipResponseFactory::create_100_trying(&packet);
                                         let _ = self.transport.send(&trying.to_bytes(), src_addr).await;
                                     }
 
-                                    // 2. Paketi incele ve yönlendir
+                                    // Paketi motor (Engine) seviyesinde incele (Deduplication buradadır)
                                     if let SipAction::Forward(mut processed_packet) = self.engine.inspect(packet, src_addr).await {
                                         self.route_packet(&mut processed_packet, src_addr).await;
                                     }
                                 },
-                                Err(e) => warn!("⚠️ Malformed SIP packet from {}: {}", src_addr, e),
+                                Err(e) => warn!("⚠️ Malformed packet from {}: {}", src_addr, e),
                             }
                         },
-                        Err(e) => error!("🔥 UDP Socket Error: {}", e),
+                        Err(e) => error!("🔥 Socket Critical Error: {}", e),
                     }
                 }
             }
@@ -93,15 +94,17 @@ impl SipServer {
 
             match self.proxy_client.lock().await.get_next_hop(request).await {
                 Ok(res) => {
+                    // Topology Hiding: Kendi IP'mizi Via'ya ekle
                     SipRouter::add_via(packet, &self.config.sip_public_ip, self.config.sip_port, "UDP");
                     let r = res.into_inner();
                     if !r.uri.is_empty() {
                         tokio::net::lookup_host(r.uri).await.ok().and_then(|mut i| i.next())
                     } else { None }
                 },
-                Err(e) => { error!("🔥 Proxy RPC Failed: {}", e); None }
+                Err(e) => { error!("🔥 Routing Logic Failed: {}", e); None }
             }
         } else { 
+            // Yanıt paketleri (200 OK vb.) Via stack takibi ile geri döner
             if SipRouter::strip_top_via(packet).is_none() { return; }
             packet.get_header_value(HeaderName::Via)
                   .and_then(|v| SipRouter::resolve_response_target(v, DEFAULT_SIP_PORT))
