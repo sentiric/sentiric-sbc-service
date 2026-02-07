@@ -1308,8 +1308,8 @@ dependencies = [
 
 [[package]]
 name = "sentiric-contracts"
-version = "1.13.7"
-source = "git+https://github.com/sentiric/sentiric-contracts.git?tag=v1.13.7#dd7c8f225ec7d96764308b95b5b50902b8cb4856"
+version = "1.15.0"
+source = "git+https://github.com/sentiric/sentiric-contracts.git?tag=v1.15.0#bdfb67253106fdb6d2a13e10846d9c3fc1be6327"
 dependencies = [
  "prost",
  "prost-types",
@@ -1332,7 +1332,7 @@ dependencies = [
 
 [[package]]
 name = "sentiric-sbc-service"
-version = "1.3.0"
+version = "1.3.1"
 dependencies = [
  "anyhow",
  "config",
