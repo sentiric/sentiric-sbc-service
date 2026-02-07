@@ -54,16 +54,13 @@ impl SipServer {
                             let data = &buf[..len];
 
                             match parser::parse(data) {
-                                Ok(mut packet) => {
-                                    // [TELEKOM STANDARDI]: 
-                                    // Paket geldiği anda, hiçbir gRPC çağrısı yapmadan 100 Trying gönder.
-                                    // Bu, istemcinin (Baresip/Operatör) timeout olmasını engeller.
+                                // [v1.3.2 Fix]: removed unnecessary 'mut'
+                                Ok(packet) => {
                                     if packet.is_request && packet.method == sentiric_sip_core::Method::Invite {
                                         let trying = SipResponseFactory::create_100_trying(&packet);
                                         let _ = self.transport.send(&trying.to_bytes(), src_addr).await;
                                     }
 
-                                    // Paketi motor (Engine) seviyesinde incele (Deduplication buradadır)
                                     if let SipAction::Forward(mut processed_packet) = self.engine.inspect(packet, src_addr).await {
                                         self.route_packet(&mut processed_packet, src_addr).await;
                                     }
@@ -94,7 +91,6 @@ impl SipServer {
 
             match self.proxy_client.lock().await.get_next_hop(request).await {
                 Ok(res) => {
-                    // Topology Hiding: Kendi IP'mizi Via'ya ekle
                     SipRouter::add_via(packet, &self.config.sip_public_ip, self.config.sip_port, "UDP");
                     let r = res.into_inner();
                     if !r.uri.is_empty() {
@@ -104,7 +100,6 @@ impl SipServer {
                 Err(e) => { error!("🔥 Routing Logic Failed: {}", e); None }
             }
         } else { 
-            // Yanıt paketleri (200 OK vb.) Via stack takibi ile geri döner
             if SipRouter::strip_top_via(packet).is_none() { return; }
             packet.get_header_value(HeaderName::Via)
                   .and_then(|v| SipRouter::resolve_response_target(v, DEFAULT_SIP_PORT))
