@@ -72,25 +72,33 @@ impl SipServer {
         }
     }
 
+    /// route_packet: Paketi Proxy Service'in kararına göre yönlendirir.
     async fn route_packet(&self, packet: &mut SipPacket, src_addr: SocketAddr) {
         let target_addr = if packet.is_request {
             let method = packet.method.to_string();
             let to_header = packet.get_header_value(HeaderName::To).cloned().unwrap_or_default();
+            
+            // 1. Aranan hedefi (AOR) ayıkla.
             let dest_uri = sentiric_sip_core::utils::extract_aor(&to_header);
 
-            // [v1.15.0 ALIGNMENT] `From` başlığını ayıkla
+            // 2. [IDENTITY RESTORATION] Arayan kişinin ham URI'sini ayıkla.
+            // Bu alan v1.15.0 kontratı için kritiktir.
             let from_uri = packet.get_header_value(HeaderName::From).cloned().unwrap_or_default();
+
+            info!("🔍 Routing Request: Method={}, From={}, Dest={}", method, from_uri, dest_uri);
 
             let request = tonic::Request::new(GetNextHopRequest {
                 destination_uri: dest_uri,
                 source_ip: src_addr.ip().to_string(),
                 method,
-                from_uri, // Yeni kontrata göre doldur
+                from_uri, // [v1.15.0 FIX]: Kimlik artık Proxy'ye taşınıyor.
             });
 
             match self.proxy_client.lock().await.get_next_hop(request).await {
                 Ok(res) => {
+                    // Via manipülasyonu (Topology Hiding)
                     SipRouter::add_via(packet, &self.config.sip_public_ip, self.config.sip_port, "UDP");
+                    
                     let r = res.into_inner();
                     if !r.uri.is_empty() {
                         tokio::net::lookup_host(r.uri).await.ok().and_then(|mut i| i.next())
@@ -99,6 +107,7 @@ impl SipServer {
                 Err(e) => { error!("🔥 Proxy RPC Failed: {}", e); None }
             }
         } else { 
+            // Yanıt paketleri için Via stack'ini takip et.
             if SipRouter::strip_top_via(packet).is_none() { return; }
             packet.get_header_value(HeaderName::Via)
                   .and_then(|v| SipRouter::resolve_response_target(v, DEFAULT_SIP_PORT))
