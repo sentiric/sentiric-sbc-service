@@ -1,19 +1,16 @@
 // sentiric-sbc-service/src/sip/server.rs
 
 use crate::config::AppConfig;
-// DÜZELTME: Kullanılmayan import kaldırıldı.
-// use crate::grpc::client::ProxyClient;
 use crate::sip::engine::{SbcEngine, SipAction};
-use crate::rtp::engine::RtpEngine;
-use anyhow::Result;
+use crate::rtp::engine::RtpEngine; // [E0433 FIX]
+use anyhow::Result; // [E0107 FIX] - anyhow::Result tek argüman alır
 use sentiric_sip_core::{parser, SipTransport, SipPacket, HeaderName, SipRouter};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::{mpsc, Mutex};
-use tracing::{debug, error, info, warn};
+use tracing::{error, info, warn, debug};
 use tonic::transport::Channel;
 use sentiric_contracts::sentiric::sip::v1::{proxy_service_client::ProxyServiceClient, GetNextHopRequest};
-use tokio::net::lookup_host;
 
 pub const DEFAULT_SIP_PORT: u16 = 5060;
 
@@ -32,6 +29,7 @@ impl SipServer {
         let bind_addr = format!("{}:{}", config.sip_bind_ip, config.sip_port);
         let transport = SipTransport::new(&bind_addr).await?;
         
+        // RtpEngine artık modül yoluyla doğru şekilde oluşturuluyor
         let rtp_engine = Arc::new(RtpEngine::new(config.rtp_start_port, config.rtp_end_port));
         
         Ok(Self {
@@ -57,14 +55,16 @@ impl SipServer {
                 res = socket.recv_from(&mut buf) => {
                     match res {
                         Ok((len, src_addr)) => {
+                            // Temel filtreleme (Keep-alive paketleri vb.)
                             if len < 4 || (len <= 4 && buf[..len].iter().all(|&b| b == b'\r' || b == b'\n')) { continue; }
                             
                             match parser::parse(&buf[..len]) {
                                 Ok(packet) => {
+                                    // Engine üzerinden paketi denetle (Security, Rate-Limit, SDP Rewrite)
                                     if let SipAction::Forward(mut processed_packet) = self.engine.inspect(packet, src_addr).await {
                                         self.route_packet(&mut processed_packet, src_addr).await;
                                     } else {
-                                        debug!("⛔ SIP Packet dropped from {}", src_addr);
+                                        debug!("⛔ SIP Packet dropped by engine from {}", src_addr);
                                     }
                                 },
                                 Err(e) => warn!("⚠️ Malformed SIP packet from {}: {}", src_addr, e),
@@ -91,34 +91,30 @@ impl SipServer {
 
             match self.proxy_client.lock().await.get_next_hop(request).await {
                 Ok(res) => {
+                    // Kendi Via başlığımızı ekle (Topology Hiding)
                     SipRouter::add_via(packet, &self.config.sip_public_ip, self.config.sip_port, "UDP");
+                    
                     let r = res.into_inner();
-                    if !r.uri.is_empty() { self.resolve_address(&r.uri).await } 
-                    else { warn!("⚠️ Proxy service returned empty URI."); None }
+                    if !r.uri.is_empty() {
+                         r.uri.parse::<SocketAddr>().ok()
+                    } else { 
+                        warn!("⚠️ Proxy service returned empty URI."); 
+                        None 
+                    }
                 },
                 Err(e) => { error!("🔥 Proxy Service RPC Failed: {}", e); None }
             }
         } else { 
+            // Yanıtlar (Response) için: Üst Via başlığını kaldır ve hedefe gönder
             if SipRouter::strip_top_via(packet).is_none() { return; }
-            packet.get_header_value(HeaderName::Via).and_then(|v| SipRouter::resolve_response_target(v, DEFAULT_SIP_PORT))
+            packet.get_header_value(HeaderName::Via)
+                  .and_then(|v| SipRouter::resolve_response_target(v, DEFAULT_SIP_PORT))
         };
 
         if let Some(target) = target_addr {
             if let Err(e) = self.transport.send(&packet.to_bytes(), target).await {
                 error!("🔥 Failed to send to {}: {}", target, e);
             }
-        } else {
-            warn!("⚠️ Could not resolve target address for packet. Dropping.");
-        }
-    }
-
-    async fn resolve_address(&self, address: &str) -> Option<SocketAddr> {
-         if let Ok(addr) = address.parse::<SocketAddr>() {
-             return Some(addr);
-         }
-         match lookup_host(address).await {
-            Ok(mut addrs) => addrs.next(),
-            Err(e) => { error!("DNS Resolution failed for {}: {}", address, e); None }
         }
     }
 }

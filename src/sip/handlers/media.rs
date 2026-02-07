@@ -1,4 +1,5 @@
 // sentiric-sbc-service/src/sip/handlers/media.rs
+
 use sentiric_sip_core::{SipPacket, HeaderName, Header, sdp::SdpManipulator};
 use std::sync::Arc;
 use crate::rtp::engine::RtpEngine;
@@ -18,10 +19,11 @@ impl MediaHandler {
     pub async fn process_sdp(&self, packet: &mut SipPacket) -> bool {
         let call_id = match packet.get_header_value(HeaderName::CallId) {
             Some(cid) => cid.clone(),
-            None => return true, // SDP yoksa işlem yapma
+            None => return true,
         };
 
-        let has_sdp = packet.body.len() > 0 && 
+        // SDP var mı kontrol et
+        let has_sdp = !packet.body.is_empty() && 
                       packet.get_header_value(HeaderName::ContentType)
                             .map_or(false, |v| v.contains("application/sdp"));
 
@@ -36,19 +38,19 @@ impl MediaHandler {
             }
         };
 
-        // SDP Rewrite: Dış IP/Port bilgilerini SBC'nin Relay adresiyle değiştir
+        // SDP Rewrite: IP ve Port bilgisini SBC'nin Relay adresiyle değiştir
         let advertise_ip = if packet.is_request {
-            &self.config.sip_internal_ip // İçeri giderken iç IP (Tailscale)
+            &self.config.sip_internal_ip 
         } else {
-            &self.config.sip_public_ip   // Dışarı giderken dış IP (Public)
+            &self.config.sip_public_ip
         };
 
         if let Some(new_body) = SdpManipulator::rewrite_connection_info(&packet.body, advertise_ip, relay_port) {
             packet.body = new_body;
-            // Content-Length güncelle
+            // Content-Length başlığını güncelle
             packet.headers.retain(|h| h.name != HeaderName::ContentLength);
             packet.headers.push(Header::new(HeaderName::ContentLength, packet.body.len().to_string()));
-            info!(call_id, port = relay_port, "🎤 [SDP] Connection info rewritten.");
+            info!(call_id, port = relay_port, "🎤 [SDP] Relay port fixed to sticky session.");
         }
 
         true

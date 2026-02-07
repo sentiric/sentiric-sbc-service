@@ -26,20 +26,19 @@ impl SecurityHandler {
 
     pub fn check_access(&self, ip: IpAddr) -> bool {
         if self.blacklist.contains_key(&ip) {
-            warn!("🚫 BLOCKED: Blacklisted source detected: {}", ip);
+            warn!("🚫 [SBC-SEC] BLOCKED: Source {} is blacklisted", ip);
             return false;
         }
 
         if self.limiter.check().is_err() {
-            warn!("⏳ THROTTLED: Rate limit exceeded from source: {}", ip);
+            warn!("⏳ [SBC-SEC] THROTTLED: Rate limit from {}", ip);
             return false;
         }
-
         true
     }
 
     pub fn ban(&self, ip: IpAddr, reason: &str) {
         self.blacklist.insert(ip, reason.to_string());
-        info!("⛔ IP BANNED: {} - Reason: {}", ip, reason);
+        info!("⛔ [SBC-SEC] IP BANNED: {} - Reason: {}", ip, reason);
     }
 }
