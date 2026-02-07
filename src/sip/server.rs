@@ -4,7 +4,7 @@ use crate::config::AppConfig;
 use crate::sip::engine::{SbcEngine, SipAction};
 use crate::rtp::engine::RtpEngine;
 use anyhow::Result;
-use sentiric_sip_core::{parser, SipTransport, SipPacket, HeaderName, SipRouter};
+use sentiric_sip_core::{parser, SipTransport, SipPacket, HeaderName, SipRouter, builder::SipResponseFactory};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::{mpsc, Mutex};
@@ -22,13 +22,9 @@ pub struct SipServer {
 }
 
 impl SipServer {
-    pub async fn new(
-        config: Arc<AppConfig>,
-        proxy_client: Arc<Mutex<ProxyServiceClient<Channel>>>,
-    ) -> Result<Self> {
+    pub async fn new(config: Arc<AppConfig>, proxy_client: Arc<Mutex<ProxyServiceClient<Channel>>>) -> Result<Self> {
         let bind_addr = format!("{}:{}", config.sip_bind_ip, config.sip_port);
         let transport = SipTransport::new(&bind_addr).await?;
-        
         let rtp_engine = Arc::new(RtpEngine::new(config.rtp_start_port, config.rtp_end_port));
         
         Ok(Self {
@@ -48,16 +44,25 @@ impl SipServer {
         loop {
             tokio::select! {
                 _ = shutdown_rx.recv() => { 
-                    info!("🛑 SIP Server shutdown signal received.");
+                    info!("🛑 SIP Server shutting down.");
                     break; 
                 }
                 res = socket.recv_from(&mut buf) => {
                     match res {
                         Ok((len, src_addr)) => {
-                            if len < 4 || (len <= 4 && buf[..len].iter().all(|&b| b == b'\r' || b == b'\n')) { continue; }
-                            
-                            match parser::parse(&buf[..len]) {
-                                Ok(packet) => {
+                            if len < 4 { continue; }
+                            let data = &buf[..len];
+
+                            match parser::parse(data) {
+                                Ok(mut packet) => {
+                                    // [v2.2 MİMARİ GÜNCELLEME]: 
+                                    // 1. INVITE gelirse anında 100 Trying gönder (Retransmission engellemek için)
+                                    if packet.is_request && packet.method == sentiric_sip_core::Method::Invite {
+                                        let trying = SipResponseFactory::create_100_trying(&packet);
+                                        let _ = self.transport.send(&trying.to_bytes(), src_addr).await;
+                                    }
+
+                                    // 2. Paketi incele ve yönlendir
                                     if let SipAction::Forward(mut processed_packet) = self.engine.inspect(packet, src_addr).await {
                                         self.route_packet(&mut processed_packet, src_addr).await;
                                     }
@@ -72,33 +77,23 @@ impl SipServer {
         }
     }
 
-    /// route_packet: Paketi Proxy Service'in kararına göre yönlendirir.
     async fn route_packet(&self, packet: &mut SipPacket, src_addr: SocketAddr) {
         let target_addr = if packet.is_request {
             let method = packet.method.to_string();
             let to_header = packet.get_header_value(HeaderName::To).cloned().unwrap_or_default();
-            
-            // 1. Aranan hedefi (AOR) ayıkla.
             let dest_uri = sentiric_sip_core::utils::extract_aor(&to_header);
-
-            // 2. [IDENTITY RESTORATION] Arayan kişinin ham URI'sini ayıkla.
-            // Bu alan v1.15.0 kontratı için kritiktir.
             let from_uri = packet.get_header_value(HeaderName::From).cloned().unwrap_or_default();
-
-            info!("🔍 Routing Request: Method={}, From={}, Dest={}", method, from_uri, dest_uri);
 
             let request = tonic::Request::new(GetNextHopRequest {
                 destination_uri: dest_uri,
                 source_ip: src_addr.ip().to_string(),
                 method,
-                from_uri, // [v1.15.0 FIX]: Kimlik artık Proxy'ye taşınıyor.
+                from_uri,
             });
 
             match self.proxy_client.lock().await.get_next_hop(request).await {
                 Ok(res) => {
-                    // Via manipülasyonu (Topology Hiding)
                     SipRouter::add_via(packet, &self.config.sip_public_ip, self.config.sip_port, "UDP");
-                    
                     let r = res.into_inner();
                     if !r.uri.is_empty() {
                         tokio::net::lookup_host(r.uri).await.ok().and_then(|mut i| i.next())
@@ -107,18 +102,13 @@ impl SipServer {
                 Err(e) => { error!("🔥 Proxy RPC Failed: {}", e); None }
             }
         } else { 
-            // Yanıt paketleri için Via stack'ini takip et.
             if SipRouter::strip_top_via(packet).is_none() { return; }
             packet.get_header_value(HeaderName::Via)
                   .and_then(|v| SipRouter::resolve_response_target(v, DEFAULT_SIP_PORT))
         };
 
         if let Some(target) = target_addr {
-            if let Err(e) = self.transport.send(&packet.to_bytes(), target).await {
-                error!("🔥 Failed to send to {}: {}", target, e);
-            }
-        } else {
-            warn!("⚠️ Could not resolve target address for packet. Dropping.");
+            let _ = self.transport.send(&packet.to_bytes(), target).await;
         }
     }
 }
