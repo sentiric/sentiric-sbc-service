@@ -5,7 +5,7 @@ use tokio::net::UdpSocket;
 use dashmap::DashMap;
 use std::net::SocketAddr;
 use std::time::Duration;
-use tracing::{info, error, debug};
+use tracing::{info, error, debug, warn};
 use rand::Rng;
 
 struct RtpRelay {
@@ -56,6 +56,7 @@ impl RtpEngine {
                     }
                     active_relays_clone.remove(&port);
                     call_id_map_clone.remove(&call_id_owned);
+                    info!("♻️ Port {} released.", port);
                 });
 
                 self.active_relays.insert(port, relay);
@@ -87,8 +88,6 @@ async fn run_relay_loop(port: u16, mut stop_signal: tokio::sync::broadcast::Rece
     
     let timeout = Duration::from_secs(60); 
 
-    info!("🎤 RTP Relay Active: {}", addr);
-
     loop {
         tokio::select! {
             _ = stop_signal.recv() => break,
@@ -96,27 +95,20 @@ async fn run_relay_loop(port: u16, mut stop_signal: tokio::sync::broadcast::Rece
             res = tokio::time::timeout(timeout, socket.recv_from(&mut buf)) => {
                 match res {
                     Ok(Ok((len, src))) => {
-                        // [v2.5 MİMARİ GÜNCELLEME]: ASYMMETRIC LATCHING
-                        // 1. Eğer gelen paket peer_ext ile eşleşirse, peer_int'e gönder.
-                        // 2. Eğer gelen paket peer_int ile eşleşirse, peer_ext'e gönder.
-                        // 3. Eşleşmezse, yeni bacağı akıllıca tanı:
-                        
+                        // [v2.6 MİMARİ]: ZERO-TRUST LATCHING
                         let target = if Some(src) == peer_ext {
                             peer_int
                         } else if Some(src) == peer_int {
                             peer_ext
                         } else {
-                            // Yeni bacak tespiti
+                            // Yeni bir bacak (Peer) geldi. 
+                            // Eğer bu paket iç ağdan (Tailscale/Docker) geliyorsa İÇ BACAK yap.
                             if is_private_network(src.ip()) {
-                                if peer_int.is_none() {
-                                    info!("🔒 [LATCH-INT] Internal media locked to {}", src);
-                                }
+                                if peer_int.is_none() { info!("🔒 [LATCH-INT] Internal media path established: {}", src); }
                                 peer_int = Some(src);
                                 peer_ext
                             } else {
-                                if peer_ext.is_none() {
-                                    info!("🔒 [LATCH-EXT] External media locked to {}", src);
-                                }
+                                if peer_ext.is_none() { info!("🔒 [LATCH-EXT] External media path established: {}", src); }
                                 peer_ext = Some(src);
                                 peer_int
                             }
@@ -127,7 +119,7 @@ async fn run_relay_loop(port: u16, mut stop_signal: tokio::sync::broadcast::Rece
                         }
                     }
                     _ => {
-                        info!("💤 Port {} timed out due to silence.", port);
+                        warn!("💤 RTP Timeout on port {}", port);
                         break;
                     }
                 }
@@ -141,10 +133,9 @@ fn is_private_network(ip: std::net::IpAddr) -> bool {
     match ip {
         std::net::IpAddr::V4(ipv4) => {
             let o = ipv4.octets();
-            // 10.x, 172.16-31.x, 192.168.x, 100.64-127.x (Tailscale)
-            o[0] == 10 || o[0] == 192 && o[1] == 168 || 
-            (o[0] == 172 && o[1] >= 16 && o[1] <= 31) ||
-            (o[0] == 100 && o[1] >= 64 && o[1] <= 127)
+            // 10.x (Docker), 100.64-127.x (Tailscale), 172.16.x, 192.168.x
+            o[0] == 10 || (o[0] == 100 && o[1] >= 64 && o[1] <= 127) ||
+            (o[0] == 172 && o[1] >= 16 && o[1] <= 31) || (o[0] == 192 && o[1] == 168)
         }
         _ => false,
     }
