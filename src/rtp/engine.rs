@@ -52,11 +52,10 @@ impl RtpEngine {
 
                 tokio::spawn(async move {
                     if let Err(e) = run_relay_loop(port, stop_rx).await {
-                        error!("🔥 RTP Relay Error [{}]: {}", port, e);
+                        error!("🔥 RTP Relay Fatal Error [{}]: {}", port, e);
                     }
                     active_relays_clone.remove(&port);
                     call_id_map_clone.remove(&call_id_owned);
-                    info!("♻️ Port {} released.", port);
                 });
 
                 self.active_relays.insert(port, relay);
@@ -81,10 +80,12 @@ impl RtpEngine {
 async fn run_relay_loop(port: u16, mut stop_signal: tokio::sync::broadcast::Receiver<()>) -> anyhow::Result<()> {
     let addr = format!("0.0.0.0:{}", port);
     let socket = UdpSocket::bind(&addr).await?;
-    let mut buf = [0u8; 2048];
+    let mut buf = [0u8; 4096];
 
-    let mut peer_ext: Option<SocketAddr> = None;
-    let mut peer_int: Option<SocketAddr> = None;
+    // [v2.8 MİMARİ]: Complementary Peer Latching
+    // Bir bacak kilitlendiğinde, o bacaktan gelmeyen her paket otomatik olarak 'karşı bacak' kabul edilir.
+    let mut peer_a: Option<SocketAddr> = None; 
+    let mut peer_b: Option<SocketAddr> = None; 
     
     let timeout = Duration::from_secs(60); 
 
@@ -95,22 +96,25 @@ async fn run_relay_loop(port: u16, mut stop_signal: tokio::sync::broadcast::Rece
             res = tokio::time::timeout(timeout, socket.recv_from(&mut buf)) => {
                 match res {
                     Ok(Ok((len, src))) => {
-                        // [v2.6 MİMARİ]: ZERO-TRUST LATCHING
-                        let target = if Some(src) == peer_ext {
-                            peer_int
-                        } else if Some(src) == peer_int {
-                            peer_ext
+                        let target = if Some(src) == peer_a {
+                            peer_b
+                        } else if Some(src) == peer_b {
+                            peer_a
                         } else {
-                            // Yeni bir bacak (Peer) geldi. 
-                            // Eğer bu paket iç ağdan (Tailscale/Docker) geliyorsa İÇ BACAK yap.
-                            if is_private_network(src.ip()) {
-                                if peer_int.is_none() { info!("🔒 [LATCH-INT] Internal media path established: {}", src); }
-                                peer_int = Some(src);
-                                peer_ext
+                            // Yeni bacak tespiti
+                            if peer_a.is_none() {
+                                info!("🔒 [SBC-RTP] Bacak A Kilitlendi (Dış): {}", src);
+                                peer_a = Some(src);
+                                None
+                            } else if peer_b.is_none() {
+                                info!("🔒 [SBC-RTP] Bacak B Kilitlendi (İç): {}", src);
+                                peer_b = Some(src);
+                                peer_a
                             } else {
-                                if peer_ext.is_none() { info!("🔒 [LATCH-EXT] External media path established: {}", src); }
-                                peer_ext = Some(src);
-                                peer_int
+                                // Mevcut bacaklar dolu ama yeni paket geldi -> Roaming
+                                debug!("🔄 [SBC-RTP] Bacak B güncellendi (Roaming): {}", src);
+                                peer_b = Some(src);
+                                peer_a
                             }
                         };
 
@@ -118,25 +122,10 @@ async fn run_relay_loop(port: u16, mut stop_signal: tokio::sync::broadcast::Rece
                             let _ = socket.send_to(&buf[..len], dst).await;
                         }
                     }
-                    _ => {
-                        warn!("💤 RTP Timeout on port {}", port);
-                        break;
-                    }
+                    _ => break,
                 }
             }
         }
     }
     Ok(())
-}
-
-fn is_private_network(ip: std::net::IpAddr) -> bool {
-    match ip {
-        std::net::IpAddr::V4(ipv4) => {
-            let o = ipv4.octets();
-            // 10.x (Docker), 100.64-127.x (Tailscale), 172.16.x, 192.168.x
-            o[0] == 10 || (o[0] == 100 && o[1] >= 64 && o[1] <= 127) ||
-            (o[0] == 172 && o[1] >= 16 && o[1] <= 31) || (o[0] == 192 && o[1] == 168)
-        }
-        _ => false,
-    }
 }
