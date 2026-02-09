@@ -1,3 +1,4 @@
+// sentiric-sbc-service/src/config.rs
 use anyhow::{Context, Result};
 use std::env;
 use std::net::SocketAddr;
@@ -9,6 +10,10 @@ pub struct AppConfig {
     
     pub sip_bind_ip: String,
     pub sip_port: u16,
+    
+    // [YENİ]: Dış dünyaya ilan edilecek port (Contact Header için)
+    pub sip_advertised_port: u16, 
+    
     pub sip_public_ip: String, // Public IP (34.122...)
     pub sip_internal_ip: String, // Internal/Tailscale IP (100.67...)
     
@@ -35,6 +40,13 @@ impl AppConfig {
         let sip_port_str = env::var("SBC_SERVICE_SIP_PORT").unwrap_or_else(|_| "13094".to_string());
         let sip_port = sip_port_str.parse::<u16>().context("Geçersiz SIP portu")?;
         
+        // [YENİ]: Eğer SBC_ADVERTISED_PORT yoksa varsayılan 5060 kullan.
+        // Bu sayede kod içinde hardcode yapmaktan kurtuluyoruz.
+        let advertised_port = env::var("SBC_ADVERTISED_PORT")
+            .unwrap_or_else(|_| "5060".to_string())
+            .parse::<u16>()
+            .unwrap_or(5060);
+
         let grpc_addr: SocketAddr = format!("[::]:{}", grpc_port).parse()?;
         let http_addr: SocketAddr = format!("[::]:{}", http_port).parse()?;
         
@@ -43,7 +55,6 @@ impl AppConfig {
 
         let public_ip = env::var("SBC_SERVICE_PUBLIC_IP").unwrap_or_else(|_| "127.0.0.1".to_string());
         
-        // Tailscale IP'si (UAS buna RTP atacak)
         let internal_ip = env::var("SBC_SERVICE_INTERNAL_IP")
             .or_else(|_| env::var("NODE_IP"))
             .unwrap_or_else(|_| "127.0.0.1".to_string());
@@ -57,6 +68,8 @@ impl AppConfig {
             
             sip_bind_ip: "0.0.0.0".to_string(),
             sip_port,
+            sip_advertised_port: advertised_port, // Config'e eklendi
+            
             sip_public_ip: public_ip,
             sip_internal_ip: internal_ip,
             

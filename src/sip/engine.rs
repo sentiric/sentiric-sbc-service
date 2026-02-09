@@ -9,7 +9,7 @@ use crate::rtp::engine::RtpEngine;
 use crate::sip::handlers::security::SecurityHandler;
 use crate::sip::handlers::packet::PacketHandler;
 use crate::sip::handlers::media::MediaHandler;
-use tracing::{debug, warn};
+use tracing::{warn, info}; 
 
 pub enum SipAction {
     Forward(SipPacket),
@@ -65,7 +65,6 @@ impl SbcEngine {
         if packet.is_request {
             SipRouter::fix_nat_via(&mut packet, src_addr);
         } else {
-            // [CRITICAL FIX]: Contact Header Rewrite
             self.rewrite_contact_header(&mut packet);
         }
 
@@ -81,7 +80,7 @@ impl SbcEngine {
         SipAction::Forward(packet)
     }
 
-    /// Contact başlığını SBC'nin Public IP:Port'u ile değiştirir.
+    /// Contact başlığını SBC'nin Public IP ve Advertised Portu ile değiştirir.
     fn rewrite_contact_header(&self, packet: &mut SipPacket) {
         if packet.status_code < 200 || packet.status_code > 299 {
             return;
@@ -90,17 +89,16 @@ impl SbcEngine {
         if let Some(idx) = packet.headers.iter().position(|h| h.name == HeaderName::Contact) {
             let old_val = packet.headers[idx].value.clone();
             
-            // [FIX]: Sadece IP'ye bakmak yetmez, PORT da eşleşmeli.
-            // B2BUA Public IP'yi biliyor olabilir ama iç portu (13084) basıyordur.
-            // Bizim istediğimiz: 34.122.40.122:5060 (veya SBC portu neyse)
-            let sbc_signature = format!("{}:{}", self.config.sip_public_ip, self.config.sip_port);
+            // [FIX]: Artık hardcoded 5060 yok, config'den gelen port var.
+            let public_port = self.config.sip_advertised_port;
+            
+            // Kontrol imzası (Loop koruması)
+            let sbc_signature = format!("{}:{}", self.config.sip_public_ip, public_port);
             
             if old_val.contains(&sbc_signature) {
-                // Zaten doğru formatta, dokunma.
                 return;
             }
 
-            // Kullanıcı adını ayıkla
             let username = if let Some(start) = old_val.find("sip:") {
                 let rest = &old_val[start+4..];
                 if let Some(end) = rest.find('@') {
@@ -112,11 +110,19 @@ impl SbcEngine {
                 "sbc"
             };
 
-            // Yeni Contact: <sip:USER@PUBLIC_IP:SBC_PORT;transport=udp>
-            let new_contact = format!("<sip:{}@{}:{}>", username, self.config.sip_public_ip, self.config.sip_port);
+            // Yeni Contact
+            let new_contact = format!("<sip:{}@{}:{}>", username, self.config.sip_public_ip, public_port);
             
-            debug!("🔄 Topology Hiding Fix: {} -> {}", old_val, new_contact);
-            packet.headers[idx] = Header::new(HeaderName::Contact, new_contact);
+            if old_val != new_contact {
+                info!("🔄 [TOPOLOGY-HIDING] Contact Rewrite: {} -> {}", old_val, new_contact);
+                packet.headers[idx] = Header::new(HeaderName::Contact, new_contact);
+            }
+        } else {
+            // Hiç contact yoksa ekle
+            let public_port = self.config.sip_advertised_port;
+            warn!("⚠️ Response without Contact header. Injecting default.");
+            let default_contact = format!("<sip:sbc@{}:{}>", self.config.sip_public_ip, public_port);
+            packet.headers.push(Header::new(HeaderName::Contact, default_contact));
         }
     }
 }
