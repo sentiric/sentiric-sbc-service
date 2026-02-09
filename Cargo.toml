@@ -25,6 +25,6 @@ governor = "0.6"
 nonzero_ext = "0.3"
 
 # --- THE IRON CORE (UPGRADED) ---
-sentiric-rtp-core = { git = "https://github.com/sentiric/sentiric-rtp-core.git", tag = "v1.3.1" }
-sentiric-sip-core = { git = "https://github.com/sentiric/sentiric-sip-core.git", tag = "v1.4.1" }
-sentiric-contracts = { git = "https://github.com/sentiric/sentiric-contracts.git", tag = "v1.15.0" }
+sentiric-rtp-core = { git = "https://github.com/sentiric/sentiric-rtp-core.git", tag = "v1.3.3" }
+sentiric-sip-core = { git = "https://github.com/sentiric/sentiric-sip-core.git", tag = "v1.4.2" }
+sentiric-contracts = { git = "https://github.com/sentiric/sentiric-contracts.git", tag = "v1.16.0" }
