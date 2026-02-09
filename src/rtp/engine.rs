@@ -3,10 +3,31 @@
 use std::sync::Arc;
 use tokio::net::UdpSocket;
 use dashmap::DashMap;
-use std::net::SocketAddr;
+use std::net::{SocketAddr, IpAddr}; // IpAddr eklendi
 use std::time::Duration;
-use tracing::{info, error, debug, warn, trace}; // Trace eklendi
+use tracing::{info, error, debug, warn, trace};
 use rand::Rng;
+
+// [FIX]: IP Sınıflandırması için yardımcı fonksiyon
+fn is_internal_ip(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(ipv4) => {
+            let octets = ipv4.octets();
+            // 10.0.0.0/8
+            if octets[0] == 10 { return true; }
+            // 172.16.0.0/12
+            if octets[0] == 172 && (octets[1] >= 16 && octets[1] <= 31) { return true; }
+            // 192.168.0.0/16
+            if octets[0] == 192 && octets[1] == 168 { return true; }
+            // 100.64.0.0/10 (CGNAT / Tailscale - Sentiric Internal)
+            if octets[0] == 100 && (octets[1] >= 64 && octets[1] <= 127) { return true; }
+            // 127.0.0.0/8 (Loopback)
+            if octets[0] == 127 { return true; }
+            false
+        }
+        IpAddr::V6(ipv6) => ipv6.is_loopback(),
+    }
+}
 
 struct RtpRelay {
     pub local_port: u16,
@@ -36,7 +57,6 @@ impl RtpEngine {
         }
         
         let mut rng = rand::thread_rng();
-        // Port tükenmesini önlemek için 1000 deneme (Yüksek yük için güvenli marj)
         for _ in 0..1000 { 
             let port = rng.gen_range(self.start_port..=self.end_port);
             let port = if port % 2 != 0 { port.saturating_add(1) } else { port };
@@ -73,13 +93,13 @@ impl RtpEngine {
     pub async fn release_relay_by_call_id(&self, call_id: &str) -> bool {
         if let Some((_, port)) = self.call_id_map.remove(call_id) {
             if let Some((_, relay)) = self.active_relays.remove(&port) {
-                // [FIX]: local_port alanını burada okuyarak hem uyarıyı çözüyoruz hem de logluyoruz.
                 info!("♻️ Kaynak Temizliği: Relay Port {} serbest bırakılıyor (CallID: {})", relay.local_port, call_id);
                 let _ = relay.stop_signal.send(());
                 return true;
             }
         }
-        warn!("⚠️ Release istendi ama CallID bulunamadı: {}", call_id);
+        // Log kirliliğini azaltmak için Warn -> Debug
+        debug!("⚠️ Release istendi ama CallID bulunamadı: {}", call_id);
         false
     }
 }
@@ -89,23 +109,19 @@ async fn run_relay_loop(port: u16, mut stop_signal: tokio::sync::broadcast::Rece
     let socket = UdpSocket::bind(&addr).await?;
     let mut buf = [0u8; 4096];
 
-    // [v2.8 MİMARİ]: Complementary Peer Latching
-    let mut peer_a: Option<SocketAddr> = None; 
-    let mut peer_b: Option<SocketAddr> = None; 
+    // [CRITICAL FIX]: Network-Aware Latching (Internal vs External)
+    let mut peer_external: Option<SocketAddr> = None; // Client (Public IP)
+    let mut peer_internal: Option<SocketAddr> = None; // Media Service (Private IP)
     
-    // Paket sayacı (Logging için)
     let mut packets_forwarded = 0u64;
     let mut last_log_time = std::time::Instant::now();
-    
-    // Timeout süresi: 60 saniye boyunca hiç paket gelmezse relay kapanır.
     let timeout = Duration::from_secs(60); 
 
     loop {
-        // Her 5 saniyede bir trafik durumu raporla
         if last_log_time.elapsed() > Duration::from_secs(5) {
             if packets_forwarded > 0 {
-                debug!("📊 Relay [{}]: Son 5sn içinde {} paket iletildi. Peers: A={:?} <-> B={:?}", 
-                    port, packets_forwarded, peer_a, peer_b);
+                debug!("📊 Relay [{}]: Son 5sn {} pkt. Ext={:?} <-> Int={:?}", 
+                    port, packets_forwarded, peer_external, peer_internal);
                 packets_forwarded = 0;
             }
             last_log_time = std::time::Instant::now();
@@ -117,50 +133,45 @@ async fn run_relay_loop(port: u16, mut stop_signal: tokio::sync::broadcast::Rece
             res = tokio::time::timeout(timeout, socket.recv_from(&mut buf)) => {
                 match res {
                     Ok(Ok((len, src))) => {
-                        let target = if Some(src) == peer_a {
-                            peer_b
-                        } else if Some(src) == peer_b {
-                            peer_a
+                        let target = if Some(src) == peer_external {
+                            // Dışarıdan geldi -> İçeri gönder
+                            peer_internal
+                        } else if Some(src) == peer_internal {
+                            // İçeriden geldi -> Dışarı gönder
+                            peer_external
                         } else {
-                            // Yeni bacak tespiti (Latching)
-                            if peer_a.is_none() {
-                                info!("🔒 [LATCH-A] Dış Bacak Kilitlendi: {} -> Relay:{}", src, port);
-                                peer_a = Some(src);
-                                None // Henüz hedef (B) yok, paket düşecek.
-                            } else if peer_b.is_none() {
-                                info!("🔒 [LATCH-B] İç Bacak Kilitlendi: {} -> Relay:{}", src, port);
-                                peer_b = Some(src);
-                                peer_a // Artık A'ya gönderebiliriz
-                            } else {
-                                // Roaming (IP değişimi)
-                                if Some(src) != peer_a {
-                                    warn!("🔄 [ROAMING] Bacak B güncellendi: {:?} -> {}", peer_b, src);
-                                    peer_b = Some(src);
-                                    peer_a
-                                } else {
-                                    warn!("🔄 [ROAMING] Bacak A güncellendi: {:?} -> {}", peer_a, src);
-                                    peer_a = Some(src);
-                                    peer_b
+                            // YENİ BACAK TESPİTİ (Smart Latching)
+                            let is_internal = is_internal_ip(src.ip());
+
+                            if is_internal {
+                                if peer_internal != Some(src) {
+                                    info!("🏢 [LATCH-INT] İç Bacak (Media) Kilitlendi: {} (Port {})", src, port);
+                                    peer_internal = Some(src);
                                 }
+                                peer_external // Hedef dışarı
+                            } else {
+                                if peer_external != Some(src) {
+                                    info!("🌍 [LATCH-EXT] Dış Bacak (Client) Kilitlendi: {} (Port {})", src, port);
+                                    peer_external = Some(src);
+                                }
+                                peer_internal // Hedef içeri
                             }
                         };
 
                         if let Some(dst) = target {
                             if let Err(e) = socket.send_to(&buf[..len], dst).await {
-                                warn!("RTP Send Error [{}->{}]: {}", port, dst, e);
+                                trace!("RTP Send Error [{}->{}]: {}", port, dst, e);
                             } else {
                                 packets_forwarded += 1;
                             }
                         } else {
-                            // Hedef yoksa (Tek bacak bağlıysa) paketi düşürüyoruz. Bunu trace seviyesinde loglayalım.
-                            trace!("🗑️ Drop [{}]: Hedef henüz yok (Source: {})", port, src);
+                            // Hedef henüz yoksa paketi düşür (Normal durum, diğer taraf bağlanana kadar)
+                            // trace!("⏳ Drop [{}]: Hedef bekleniyor (Source: {})", port, src);
                         }
                     }
-                    Ok(Err(e)) => {
-                        error!("UDP Recv Error: {}", e);
-                    }
+                    Ok(Err(e)) => error!("UDP Recv Error: {}", e),
                     Err(_) => {
-                        warn!("⚠️ RTP Timeout on port {}. Traffic ceased. Closing relay.", port);
+                        warn!("⚠️ RTP Timeout on port {}. Closing relay.", port);
                         break;
                     },
                 }
