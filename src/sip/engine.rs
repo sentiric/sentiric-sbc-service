@@ -1,7 +1,6 @@
 // sentiric-sbc-service/src/sip/engine.rs
 
-// [DÜZELTME]: Header importu kaldırıldı (kullanılmıyordu)
-use sentiric_sip_core::{SipPacket, SipRouter, HeaderName, Method}; 
+use sentiric_sip_core::{SipPacket, SipRouter, HeaderName, Method, Header}; 
 use std::sync::Arc;
 use std::net::SocketAddr;
 use dashmap::DashMap;
@@ -10,14 +9,13 @@ use crate::rtp::engine::RtpEngine;
 use crate::sip::handlers::security::SecurityHandler;
 use crate::sip::handlers::packet::PacketHandler;
 use crate::sip::handlers::media::MediaHandler;
-use tracing::debug;
+use tracing::{debug, warn}; // Warn eklendi
 
 pub enum SipAction {
     Forward(SipPacket),
     Drop,
 }
 
-/// SBC İşlem Hafızası ve Yönlendirme Motoru
 pub struct SbcEngine {
     security: SecurityHandler,
     media: MediaHandler,
@@ -38,12 +36,10 @@ impl SbcEngine {
     }
 
     pub async fn inspect(&self, mut packet: SipPacket, src_addr: SocketAddr) -> SipAction {
-        // 1. Güvenlik Filtresi
         if !self.security.check_access(src_addr.ip()) {
             return SipAction::Drop;
         }
 
-        // 2. [DEDUPLICATION]: Mükerrer INVITE kontrolü
         if packet.is_request && packet.method == Method::Invite {
             let call_id = packet.get_header_value(HeaderName::CallId).cloned().unwrap_or_default();
             let cseq = packet.get_header_value(HeaderName::CSeq).cloned().unwrap_or_default();
@@ -61,28 +57,23 @@ impl SbcEngine {
             });
         }
 
-        // 3. Paket Sanitizasyonu
         if packet.is_request && !PacketHandler::sanitize(&packet) {
             self.security.ban(src_addr.ip(), "Malicious pattern");
             return SipAction::Drop;
         }
 
-        // 4. NAT Fix ve Topology Hiding
         if packet.is_request {
             SipRouter::fix_nat_via(&mut packet, src_addr);
         } else {
-            // [CRITICAL ARCHITECTURE FIX]: Topology Hiding
-            // B2BUA'dan gelen cevaplarda (200 OK), Contact başlığı iç IP'yi gösterir.
-            // Bunu SBC'nin dış IP'si ile değiştirmeliyiz ki ACK bize gelsin.
+            // [CRITICAL FIX]: Topology Hiding & ACK Routing Fix
+            // 200 OK yanıtlarında Contact başlığını SBC'nin Public IP'si ile değiştir.
             self.rewrite_contact_header(&mut packet);
         }
 
-        // 5. [STICKY MEDIA]: SDP rewrite ve port tahsisi
         if !self.media.process_sdp(&mut packet).await {
             return SipAction::Drop;
         }
         
-        // 6. Yaşam Döngüsü: BYE geldiyse portu temizle
         if packet.method == Method::Bye {
             let call_id = packet.get_header_value(HeaderName::CallId).cloned().unwrap_or_default();
             self.rtp_engine.release_relay_by_call_id(&call_id).await;
@@ -91,39 +82,46 @@ impl SbcEngine {
         SipAction::Forward(packet)
     }
 
-    /// Contact başlığını SBC'nin Public IP'si ile değiştirir.
-    /// Örnek: Contact: <sip:1001@10.0.0.5:13084>  -->  Contact: <sip:1001@34.122.40.122:5060>
     fn rewrite_contact_header(&self, packet: &mut SipPacket) {
-        // Sadece 200 OK gibi başarılı cevaplarda Contact başlığı kritiktir.
-        if packet.status_code != 200 {
+        if packet.status_code < 200 || packet.status_code > 299 {
             return;
         }
 
-        if let Some(contact_header) = packet.headers.iter_mut().find(|h| h.name == HeaderName::Contact) {
-            let old_val = contact_header.value.clone();
+        // Contact başlığını bul ve değiştir
+        // Iterator yerine index ile erişim daha güvenli (borrow checker için)
+        if let Some(idx) = packet.headers.iter().position(|h| h.name == HeaderName::Contact) {
+            let old_val = packet.headers[idx].value.clone();
             
-            // Eğer Contact zaten bizim Public IP'mizi içeriyorsa (Loop durumu), dokunma.
+            // Loop koruması
             if old_val.contains(&self.config.sip_public_ip) {
                 return;
             }
 
-            // Orijinal kullanıcı adını (örn: 1001 veya b2bua) koru.
+            // Username'i koru, geri kalanını değiştir
             let username = if let Some(start) = old_val.find("sip:") {
                 let rest = &old_val[start+4..];
                 if let Some(end) = rest.find('@') {
-                    &rest[..end] // @ işaretine kadar olan kısım
+                    &rest[..end]
                 } else {
-                    "sbc" // Format bozuksa generic isim
+                    "sbc"
                 }
             } else {
                 "sbc"
             };
 
-            // Yeni Contact başlığını oluştur: <sip:USER@PUBLIC_IP:SIP_PORT>
+            // Yeni Contact: <sip:USER@PUBLIC_IP:SIP_PORT>
+            // transport=udp eklemek bazı clientlar için faydalıdır.
             let new_contact = format!("<sip:{}@{}:{}>", username, self.config.sip_public_ip, self.config.sip_port);
             
-            debug!("🔄 Topology Hiding (Contact Rewrite): {} -> {}", old_val, new_contact);
-            contact_header.value = new_contact;
+            debug!("🔄 Contact Rewrite: {} -> {}", old_val, new_contact);
+            
+            // Header'ı güncelle
+            packet.headers[idx] = Header::new(HeaderName::Contact, new_contact);
+        } else {
+            // Contact yoksa ekle (Nadir durum ama gerekli)
+            warn!("⚠️ Response without Contact header. Injecting default.");
+            let default_contact = format!("<sip:sbc@{}:{}>", self.config.sip_public_ip, self.config.sip_port);
+            packet.headers.push(Header::new(HeaderName::Contact, default_contact));
         }
     }
 }
