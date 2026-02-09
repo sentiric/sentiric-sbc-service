@@ -6,6 +6,7 @@ use crate::rtp::engine::RtpEngine;
 use crate::config::AppConfig;
 use tracing::{info, error};
 use regex::Regex;
+use std::net::SocketAddr;
 
 pub struct MediaHandler {
     rtp_engine: Arc<RtpEngine>,
@@ -28,13 +29,25 @@ impl MediaHandler {
             None => return true,
         };
 
-        let has_sdp = !packet.body.is_empty() && 
-                      packet.get_header_value(HeaderName::ContentType)
-                            .map_or(false, |v| v.contains("application/sdp"));
+        if packet.body.is_empty() { return true; }
 
-        if !has_sdp { return true; }
+        // [CRITICAL FIX]: Müşterinin RTP adresini SDP'den önden öğren.
+        let mut client_rtp_addr: Option<SocketAddr> = None;
+        if packet.is_request { // Sadece gelen INVITE için
+            let sdp_str = String::from_utf8_lossy(&packet.body);
+            let mut ip = "0.0.0.0";
+            let mut port = 0u16;
+            for line in sdp_str.lines() {
+                if line.starts_with("c=IN IP4 ") { ip = line[9..].trim(); }
+                if line.starts_with("m=audio ") {
+                    port = line.split_whitespace().nth(1).and_then(|p| p.parse().ok()).unwrap_or(0);
+                }
+            }
+            if port > 0 { client_rtp_addr = format!("{}:{}", ip, port).parse().ok(); }
+        }
 
-        let relay_port = match self.rtp_engine.get_or_allocate_relay(&call_id).await {
+        // [GÜNCELLENDİ]: Relay tahsis edilirken aday adres gönderiliyor
+        let relay_port = match self.rtp_engine.get_or_allocate_relay(&call_id, client_rtp_addr).await {
             Some(port) => port,
             None => {
                 error!("❌ RTP RELAY FAILURE: No ports available for Call-ID {}", call_id);
@@ -50,21 +63,11 @@ impl MediaHandler {
 
         if let Some(new_body) = SdpManipulator::rewrite_connection_info(&packet.body, advertise_ip, relay_port) {
             let body_str = String::from_utf8_lossy(&new_body);
-            
-            // [FIX]: RTCP satırını silmek yerine GÜNCELLE.
-            // a=rtcp:<PORT+1> IN IP4 <IP>
-            // Eski satır varsa sil, sonra yenisini m=audio'dan sonra ekle.
             let clean_body = self.rtcp_regex.replace_all(&body_str, "");
-            
-            // RTCP satırını m=audio satırından hemen sonraya değil, a=sendrecv öncesine ekleyelim.
-            // Basitçe body'nin sonuna eklemek de çalışır ama düzenli olsun.
             let rtcp_line = format!("a=rtcp:{} IN IP4 {}\r\n", relay_port + 1, advertise_ip);
-            
-            // Body string'e çevir ve ekle
             let final_body = format!("{}{}", clean_body, rtcp_line);
             
             packet.body = final_body.as_bytes().to_vec();
-
             packet.headers.retain(|h| h.name != HeaderName::ContentLength);
             packet.headers.push(Header::new(HeaderName::ContentLength, packet.body.len().to_string()));
             
