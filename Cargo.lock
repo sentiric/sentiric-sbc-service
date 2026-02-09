@@ -1332,7 +1332,7 @@ dependencies = [
 
 [[package]]
 name = "sentiric-sbc-service"
-version = "1.3.3"
+version = "1.3.4"
 dependencies = [
  "anyhow",
  "config",
@@ -1343,6 +1343,7 @@ dependencies = [
  "nonzero_ext",
  "prost",
  "rand",
+ "regex",
  "sentiric-contracts",
  "sentiric-rtp-core",
  "sentiric-sip-core",
