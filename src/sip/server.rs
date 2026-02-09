@@ -36,7 +36,7 @@ impl SipServer {
     }
     
     pub async fn run(self, mut shutdown_rx: mpsc::Receiver<()>) {
-        info!("📡 SBC (Iron Core v2.2) Listener Active: {}:{}", self.config.sip_bind_ip, self.config.sip_port);
+        info!("📡 SBC (Iron Core v2.3 - Fixed Routing) Listener Active: {}:{}", self.config.sip_bind_ip, self.config.sip_port);
         
         let mut buf = vec![0u8; 65535];
         let socket = self.transport.get_socket();
@@ -54,7 +54,6 @@ impl SipServer {
                             let data = &buf[..len];
 
                             match parser::parse(data) {
-                                // [v1.3.2 Fix]: removed unnecessary 'mut'
                                 Ok(packet) => {
                                     if packet.is_request && packet.method == sentiric_sip_core::Method::Invite {
                                         let trying = SipResponseFactory::create_100_trying(&packet);
@@ -78,8 +77,13 @@ impl SipServer {
     async fn route_packet(&self, packet: &mut SipPacket, src_addr: SocketAddr) {
         let target_addr = if packet.is_request {
             let method = packet.method.to_string();
-            let to_header = packet.get_header_value(HeaderName::To).cloned().unwrap_or_default();
-            let dest_uri = sentiric_sip_core::utils::extract_aor(&to_header);
+            
+            // [CRITICAL FIX v2.3]: Yönlendirme için 'To' başlığı yerine 'Request-URI' kullanılmalı.
+            // ACK ve BYE gibi paketlerde Request-URI doğrudan hedefi (b2bua) gösterir.
+            // Eski Kod: extract_aor(&to_header) -> HATALI (9999 olarak kalıyordu)
+            // Yeni Kod: packet.uri.clone() -> DOĞRU (sip:b2bua@... olarak gidiyor)
+            let dest_uri = packet.uri.clone();
+            
             let from_uri = packet.get_header_value(HeaderName::From).cloned().unwrap_or_default();
 
             let request = tonic::Request::new(GetNextHopRequest {
