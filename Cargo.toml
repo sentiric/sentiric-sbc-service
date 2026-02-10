@@ -1,6 +1,6 @@
 [package]
 name = "sentiric-sbc-service"
-version = "1.3.6"
+version = "1.3.7"
 edition = "2021"
 
 [dependencies]
@@ -27,7 +27,7 @@ nonzero_ext = "0.3"
 # --- STRING PROCESSING ---
 regex = "1"
 
-# --- THE IRON CORE ---
-sentiric-rtp-core = { git = "https://github.com/sentiric/sentiric-rtp-core.git", tag = "v1.3.6" }
+# --- THE IRON CORE (UPDATED TO LATEST STABLE) ---
+sentiric-rtp-core = { git = "https://github.com/sentiric/sentiric-rtp-core.git", tag = "v1.3.8" }
 sentiric-sip-core = { git = "https://github.com/sentiric/sentiric-sip-core.git", tag = "v1.4.3" }
 sentiric-contracts = { git = "https://github.com/sentiric/sentiric-contracts.git", tag = "v1.16.0" }
