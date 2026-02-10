@@ -1,5 +1,4 @@
 // sentiric-sbc-service/src/sip/engine.rs
-
 use sentiric_sip_core::{SipPacket, SipRouter, HeaderName, Method, Header}; 
 use std::sync::Arc;
 use std::net::SocketAddr;
@@ -9,7 +8,7 @@ use crate::rtp::engine::RtpEngine;
 use crate::sip::handlers::security::SecurityHandler;
 use crate::sip::handlers::packet::PacketHandler;
 use crate::sip::handlers::media::MediaHandler;
-use tracing::{warn, info}; 
+use tracing::{warn, info, debug}; // [FIX]: debug eklendi
 
 pub enum SipAction {
     Forward(SipPacket),
@@ -36,6 +35,9 @@ impl SbcEngine {
     }
 
     pub async fn inspect(&self, mut packet: SipPacket, src_addr: SocketAddr) -> SipAction {
+        // [FIX]: spdlog -> tracing::debug
+        debug!("📥 [SBC-IN] Packet from {}: {}", src_addr, packet.method);
+
         if !self.security.check_access(src_addr.ip()) {
             return SipAction::Drop;
         }
@@ -80,49 +82,25 @@ impl SbcEngine {
         SipAction::Forward(packet)
     }
 
-    /// Contact başlığını SBC'nin Public IP ve Advertised Portu ile değiştirir.
     fn rewrite_contact_header(&self, packet: &mut SipPacket) {
-        if packet.status_code < 200 || packet.status_code > 299 {
+        if packet.status_code < 180 || packet.status_code > 299 {
             return;
         }
 
+        let public_port = self.config.sip_advertised_port;
+        let new_contact = format!("<sip:sbc@{}:{}>", self.config.sip_public_ip, public_port);
+
         if let Some(idx) = packet.headers.iter().position(|h| h.name == HeaderName::Contact) {
             let old_val = packet.headers[idx].value.clone();
-            
-            // [FIX]: Artık hardcoded 5060 yok, config'den gelen port var.
-            let public_port = self.config.sip_advertised_port;
-            
-            // Kontrol imzası (Loop koruması)
-            let sbc_signature = format!("{}:{}", self.config.sip_public_ip, public_port);
-            
-            if old_val.contains(&sbc_signature) {
-                return;
-            }
-
-            let username = if let Some(start) = old_val.find("sip:") {
-                let rest = &old_val[start+4..];
-                if let Some(end) = rest.find('@') {
-                    &rest[..end]
-                } else {
-                    "sbc"
-                }
-            } else {
-                "sbc"
-            };
-
-            // Yeni Contact
-            let new_contact = format!("<sip:{}@{}:{}>", username, self.config.sip_public_ip, public_port);
-            
-            if old_val != new_contact {
+            if !old_val.contains(&self.config.sip_public_ip) {
+                // [FIX]: spdlog -> tracing::info
                 info!("🔄 [TOPOLOGY-HIDING] Contact Rewrite: {} -> {}", old_val, new_contact);
                 packet.headers[idx] = Header::new(HeaderName::Contact, new_contact);
             }
         } else {
-            // Hiç contact yoksa ekle
-            let public_port = self.config.sip_advertised_port;
-            warn!("⚠️ Response without Contact header. Injecting default.");
-            let default_contact = format!("<sip:sbc@{}:{}>", self.config.sip_public_ip, public_port);
-            packet.headers.push(Header::new(HeaderName::Contact, default_contact));
+            // [FIX]: spdlog -> tracing::debug
+            debug!("⚠️ Response without Contact header from internal. Injecting SBC address.");
+            packet.headers.push(Header::new(HeaderName::Contact, new_contact));
         }
     }
 }
