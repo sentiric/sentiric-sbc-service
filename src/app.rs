@@ -5,7 +5,6 @@ use crate::grpc::service::MySbcService;
 use crate::sip::server::SipServer;
 use crate::tls::load_server_tls_config;
 use anyhow::{Context, Result};
-// DEĞİŞTİ: Artık harici kütüphaneden geliyor.
 use sentiric_contracts::sentiric::sip::v1::sbc_service_server::SbcServiceServer;
 use std::convert::Infallible;
 use std::env;
@@ -42,10 +41,11 @@ impl App {
         let env_filter = EnvFilter::try_from_default_env().or_else(|_| EnvFilter::try_new(&rust_log_env))?;
         let subscriber = Registry::default().with(env_filter);
         
-        if config.env == "development" {
-            subscriber.with(fmt::layer().with_target(true).with_line_number(true)).init();
+        // [DEĞİŞİKLİK BURADA: LOG FORMATI]
+        if config.env == "production" {
+            subscriber.with(fmt::layer().json()).init();
         } else {
-            subscriber.with(fmt::layer().json().with_current_span(true).with_span_list(true)).init();
+            subscriber.with(fmt::layer().compact()).init();
         }
 
         info!(
