@@ -6,22 +6,23 @@ use std::sync::Arc;
 use tokio::fs;
 use tokio::sync::Mutex;
 use tonic::transport::{Certificate, Channel, ClientTlsConfig, Identity};
-use tracing::info;
+use tracing::{info, warn, error};
+use std::time::Duration;
 
-// DEĞİŞTİ: Artık harici kütüphaneden geliyor.
+// gRPC İstemcisi
 use sentiric_contracts::sentiric::sip::v1::proxy_service_client::ProxyServiceClient;
 
 pub struct ProxyClient;
 
 impl ProxyClient {
+    /// Proxy Service'e gRPC üzerinden bağlanır. 
+    /// Bağlantı kurulana kadar sonsuza kadar dener.
     pub async fn connect(
         config: Arc<AppConfig>,
     ) -> Result<Arc<Mutex<ProxyServiceClient<Channel>>>, ServiceError> {
-        info!(
-            "gRPC istemcisi Proxy Service'e bağlanıyor: {}",
-            &config.proxy_grpc_addr
-        );
+        info!("🔌 Proxy Service'e bağlanılıyor: {}", &config.proxy_grpc_addr);
 
+        // Sertifikaları yükle (Dosya okuma hataları hala kritiktir)
         let identity = {
             let cert = fs::read(&config.cert_path)
                 .await
@@ -40,19 +41,38 @@ impl ProxyClient {
         };
 
         let tls_config = ClientTlsConfig::new()
-            .domain_name("proxy-service") // SNI için kritik
+            .domain_name("proxy-service") 
             .ca_certificate(ca_cert)
             .identity(identity);
 
-        let channel = Channel::from_shared(config.proxy_grpc_addr.clone())
-            .context("Geçersiz gRPC hedef adresi")?
-            .tls_config(tls_config)?
-            .connect()
-            .await?;
+        // --- RESILIENT CONNECTION LOOP ---
+        let mut attempt = 0;
+        loop {
+            attempt += 1;
+            
+            // 1. Channel Yapılandırması
+            let channel_res = Channel::from_shared(config.proxy_grpc_addr.clone())
+                .map_err(|e| ServiceError::ConfigError(anyhow::anyhow!("Geçersiz URL: {}", e)))?
+                .tls_config(tls_config.clone())
+                .map_err(|e| ServiceError::ConfigError(anyhow::anyhow!("TLS Konfig Hatası: {}", e)))?
+                .connect_timeout(Duration::from_secs(5))
+                .connect()
+                .await;
 
-        let client = ProxyServiceClient::new(channel);
-        info!("Proxy Service'e gRPC bağlantısı başarıyla kuruldu.");
-
-        Ok(Arc::new(Mutex::new(client)))
+            match channel_res {
+                Ok(channel) => {
+                    info!("✅ Proxy Service bağlantısı sağlandı (Deneme: {}).", attempt);
+                    let client = ProxyServiceClient::new(channel);
+                    return Ok(Arc::new(Mutex::new(client)));
+                }
+                Err(e) => {
+                    error!(
+                        "⚠️ Proxy Service'e bağlanılamadı (Deneme: {}): {}. 5 saniye sonra tekrar denenecek...",
+                        attempt, e
+                    );
+                    tokio::time::sleep(Duration::from_secs(5)).await;
+                }
+            }
+        }
     }
 }
