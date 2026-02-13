@@ -1,5 +1,7 @@
 // sentiric-sbc-service/src/sip/engine.rs
-use sentiric_sip_core::{SipPacket, SipRouter, HeaderName, Method, Header}; 
+
+use sentiric_sip_core::{SipPacket, SipRouter, HeaderName, Method}; 
+use sentiric_sip_core::utils::apply_topology_hiding; // YENİ HELPER
 use std::sync::Arc;
 use std::net::SocketAddr;
 use dashmap::DashMap;
@@ -8,7 +10,7 @@ use crate::rtp::engine::RtpEngine;
 use crate::sip::handlers::security::SecurityHandler;
 use crate::sip::handlers::packet::PacketHandler;
 use crate::sip::handlers::media::MediaHandler;
-use tracing::{warn, info, debug}; // [FIX]: debug eklendi
+use tracing::{info, debug};
 
 pub enum SipAction {
     Forward(SipPacket),
@@ -35,7 +37,6 @@ impl SbcEngine {
     }
 
     pub async fn inspect(&self, mut packet: SipPacket, src_addr: SocketAddr) -> SipAction {
-        // [FIX]: spdlog -> tracing::debug
         debug!("📥 [SBC-IN] Packet from {}: {}", src_addr, packet.method);
 
         if !self.security.check_access(src_addr.ip()) {
@@ -67,7 +68,8 @@ impl SbcEngine {
         if packet.is_request {
             SipRouter::fix_nat_via(&mut packet, src_addr);
         } else {
-            self.rewrite_contact_header(&mut packet);
+            // [REFACTOR]: Core library helper kullanımı
+            self.apply_hiding(&mut packet);
         }
 
         if !self.media.process_sdp(&mut packet).await {
@@ -82,40 +84,18 @@ impl SbcEngine {
         SipAction::Forward(packet)
     }
 
-    fn rewrite_contact_header(&self, packet: &mut SipPacket) {
+    fn apply_hiding(&self, packet: &mut SipPacket) {
+        // Sadece 180-299 arası (Başarılı/Ringing) cevaplar için
         if packet.status_code < 180 || packet.status_code > 299 {
             return;
         }
 
-        let public_port = self.config.sip_advertised_port; // Genellikle 5060
-        
-        // [STANDARDİZASYON]: User kısmını koru, host/port kısmını SBC yap.
-        // Örn: <sip:b2bua@internal:13084> -> <sip:b2bua@public_ip:5060>
-        // Bu sayede ACK tekrar SBC'ye gelir ama hedef kullanıcı (b2bua) korunur.
-        
-        let old_contact = packet.get_header_value(HeaderName::Contact).cloned().unwrap_or_default();
-        let user_part = if let Some(idx) = old_contact.find('@') {
-            if let Some(start) = old_contact.find(':') {
-                // sip:user@...
-                &old_contact[start+1..idx]
-            } else {
-                "sbc"
-            }
-        } else {
-            "sbc"
-        };
+        let public_ip = &self.config.sip_public_ip;
+        let public_port = self.config.sip_advertised_port;
 
-        let new_contact = format!("<sip:{}@{}:{}>", user_part, self.config.sip_public_ip, public_port);
-
-        if let Some(idx) = packet.headers.iter().position(|h| h.name == HeaderName::Contact) {
-            let old_val = packet.headers[idx].value.clone();
-            if !old_val.contains(&self.config.sip_public_ip) {
-                info!("🔄 [TOPOLOGY-HIDING] Contact Rewrite: {} -> {}", old_val, new_contact);
-                packet.headers[idx] = Header::new(HeaderName::Contact, new_contact);
-            }
-        } else {
-            debug!("⚠️ Response without Contact header from internal. Injecting SBC address.");
-            packet.headers.push(Header::new(HeaderName::Contact, new_contact));
+        // Core library fonksiyonu ile Contact header rewrite
+        if apply_topology_hiding(packet, public_ip, public_port) {
+            info!("🔄 [TOPOLOGY-HIDING] Contact Header rewritten to {}:{}", public_ip, public_port);
         }
     }
 }

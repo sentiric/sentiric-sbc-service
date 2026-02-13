@@ -4,7 +4,7 @@ use crate::config::AppConfig;
 use crate::sip::engine::{SbcEngine, SipAction};
 use crate::rtp::engine::RtpEngine;
 use anyhow::Result;
-use sentiric_sip_core::{parser, SipTransport, SipPacket, HeaderName, SipRouter, builder::SipResponseFactory};
+use sentiric_sip_core::{parser, SipTransport, SipPacket, HeaderName, SipRouter, builder::SipResponseFactory, Method}; // Method Eklendi
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::{mpsc, Mutex};
@@ -55,7 +55,7 @@ impl SipServer {
 
                             match parser::parse(data) {
                                 Ok(packet) => {
-                                    if packet.is_request && packet.method == sentiric_sip_core::Method::Invite {
+                                    if packet.is_request && packet.method == Method::Invite {
                                         let trying = SipResponseFactory::create_100_trying(&packet);
                                         let _ = self.transport.send(&trying.to_bytes(), src_addr).await;
                                     }
@@ -78,19 +78,20 @@ impl SipServer {
         let target_addr = if packet.is_request {
             let method = packet.method.to_string();
             
-            // [CRITICAL FIX v2.3]: Yönlendirme için 'To' başlığı yerine 'Request-URI' kullanılmalı.
-            // ACK ve BYE gibi paketlerde Request-URI doğrudan hedefi (b2bua) gösterir.
-            // Eski Kod: extract_aor(&to_header) -> HATALI (9999 olarak kalıyordu)
-            // Yeni Kod: packet.uri.clone() -> DOĞRU (sip:b2bua@... olarak gidiyor)
+            // Request-URI üzerinden yönlendirme (Doğru hedef tespiti)
             let dest_uri = packet.uri.clone();
-            
             let from_uri = packet.get_header_value(HeaderName::From).cloned().unwrap_or_default();
+
+            // [FIX]: Proxy'ye bu paketin bir diyalog içi (ACK, BYE, CANCEL) paket olup olmadığını söylemeliyiz.
+            // Böylece Proxy, Dialplan'a sormadan direkt yönlendirme (Loose Routing) yapabilir.
+            let is_in_dialog = matches!(packet.method, Method::Ack | Method::Bye | Method::Cancel);
 
             let request = tonic::Request::new(GetNextHopRequest {
                 destination_uri: dest_uri,
                 source_ip: src_addr.ip().to_string(),
                 method,
                 from_uri,
+                is_in_dialog, // EKLENDİ
             });
 
             match self.proxy_client.lock().await.get_next_hop(request).await {
