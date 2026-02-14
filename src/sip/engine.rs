@@ -1,7 +1,7 @@
 // sentiric-sbc-service/src/sip/engine.rs
 
 use sentiric_sip_core::{SipPacket, SipRouter, HeaderName, Method}; 
-use sentiric_sip_core::utils::apply_topology_hiding; // YENİ HELPER
+use sentiric_sip_core::utils::apply_topology_hiding; // Otorite kullanımı
 use std::sync::Arc;
 use std::net::SocketAddr;
 use dashmap::DashMap;
@@ -37,13 +37,15 @@ impl SbcEngine {
     }
 
     pub async fn inspect(&self, mut packet: SipPacket, src_addr: SocketAddr) -> SipAction {
-        debug!("📥 [SBC-IN] Packet from {}: {}", src_addr, packet.method);
+        debug!("📥 [SBC-IN] Processing from {}: {}", src_addr, packet.method);
 
+        // 1. IP Whitelist/Rate Limit Kontrolü
         if !self.security.check_access(src_addr.ip()) {
             return SipAction::Drop;
         }
 
-        if packet.is_request && packet.method == Method::Invite {
+        // 2. Transaction Flood Koruması
+        if packet.is_request() && packet.method == Method::Invite {
             let call_id = packet.get_header_value(HeaderName::CallId).cloned().unwrap_or_default();
             let cseq = packet.get_header_value(HeaderName::CSeq).cloned().unwrap_or_default();
             let tx_key = format!("{}-{}", call_id, cseq);
@@ -60,42 +62,46 @@ impl SbcEngine {
             });
         }
 
-        if packet.is_request && !PacketHandler::sanitize(&packet) {
+        // 3. Zararlı Paket Taraması (Scanner vs.)
+        if packet.is_request() && !PacketHandler::sanitize(&packet) {
             self.security.ban(src_addr.ip(), "Malicious pattern");
             return SipAction::Drop;
         }
 
-        if packet.is_request {
+        // 4. NAT Düzeltmesi (Via Header)
+        if packet.is_request() {
             SipRouter::fix_nat_via(&mut packet, src_addr);
-        } else {
-            // [REFACTOR]: Core library helper kullanımı
-            self.apply_hiding(&mut packet);
         }
 
+        // 5. TOPOLOGY HIDING (Contact Header Fix)
+        // [HARDENING]: 0.0.0.0 sızıntısını engellemek için core helper'ı her durumda çağırıyoruz.
+        self.apply_hiding(&mut packet);
+
+        // 6. SDP REWRITE & RTP ALLOCATION
         if !self.media.process_sdp(&mut packet).await {
             return SipAction::Drop;
         }
         
+        // 7. Kaynak Temizliği (BYE gelirse)
         if packet.method == Method::Bye {
             let call_id = packet.get_header_value(HeaderName::CallId).cloned().unwrap_or_default();
             self.rtp_engine.release_relay_by_call_id(&call_id).await;
+            info!("♻️ [RTP-CLEANUP] Call {} ended. Relay ports released.", call_id);
         }
         
         SipAction::Forward(packet)
     }
 
     fn apply_hiding(&self, packet: &mut SipPacket) {
-        // Sadece 180-299 arası (Başarılı/Ringing) cevaplar için
-        if packet.status_code < 180 || packet.status_code > 299 {
-            return;
-        }
-
+        // Sadece 180-299 arası (Success/Ringing) cevaplar ve giden INVITE istekleri için
         let public_ip = &self.config.sip_public_ip;
         let public_port = self.config.sip_advertised_port;
 
-        // Core library fonksiyonu ile Contact header rewrite
+        // Core library fonksiyonu ile Contact header rewrite lojiği
+        // Bu fonksiyon, Contact içindeki IP'yi kontrol eder, hatalıysa (0.0.0.0)
+        // veya iç ağ IP'siyse public IP ile ezer.
         if apply_topology_hiding(packet, public_ip, public_port) {
-            info!("🔄 [TOPOLOGY-HIDING] Contact Header rewritten to {}:{}", public_ip, public_port);
+            debug!("🔄 [TOPOLOGY-HIDING] Contact Header sanitized to {}:{}", public_ip, public_port);
         }
     }
 }
