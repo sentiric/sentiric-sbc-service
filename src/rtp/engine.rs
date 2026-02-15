@@ -12,10 +12,15 @@ fn is_internal_ip(ip: IpAddr) -> bool {
     match ip {
         IpAddr::V4(ipv4) => {
             let octets = ipv4.octets();
+            // 10.0.0.0/8
             if octets[0] == 10 { return true; }
+            // 172.16.0.0/12 - 172.31.255.255
             if octets[0] == 172 && (octets[1] >= 16 && octets[1] <= 31) { return true; }
+            // 192.168.0.0/16
             if octets[0] == 192 && octets[1] == 168 { return true; }
+            // 100.x.y.z (Tailscale / Carrier Grade NAT)
             if octets[0] == 100 && (octets[1] >= 64 && octets[1] <= 127) { return true; }
+            // Loopback
             if octets[0] == 127 { return true; }
             false
         }
@@ -66,8 +71,23 @@ impl RtpEngine {
                 let stop_rx = tx.subscribe();
 
                 tokio::spawn(async move {
-                    info!("🚀 RTP Relay Başlatıldı: Port {} | CallID: {}", port, call_id_owned);
-                    if let Err(e) = run_relay_loop(port, stop_rx, initial_peer).await {
+                    // [LATCHING LOGIC START]
+                    // initial_peer, SDP'den gelen 'candidate' adrestir.
+                    // Eğer bu adres Private IP ise ve biz Public IP'de çalışıyorsak, buna güvenemeyiz.
+                    let safe_peer = if let Some(addr) = initial_peer {
+                        if is_internal_ip(addr.ip()) {
+                            warn!("⚠️ [RTP-INIT] SDP adresi Private IP ({}), Strict Latching Modu Aktif.", addr);
+                            None // Güvenilmez, bekle.
+                        } else {
+                            Some(addr)
+                        }
+                    } else {
+                        None
+                    };
+
+                    info!("🚀 RTP Relay Başlatıldı: Port {} | CallID: {} | Initial Target: {:?}", port, call_id_owned, safe_peer);
+                    
+                    if let Err(e) = run_relay_loop(port, stop_rx, safe_peer).await {
                         error!("🔥 RTP Relay Kritik Hata [{}]: {}", port, e);
                     }
                     info!("🛑 RTP Relay Durduruldu: Port {}", port);
@@ -92,30 +112,27 @@ impl RtpEngine {
                 return true;
             }
         }
-        debug!("⚠️ Release istendi ama CallID bulunamadı: {}", call_id);
         false
     }
 }
 
-async fn run_relay_loop(port: u16, mut stop_signal: tokio::sync::broadcast::Receiver<()>, initial_peer: Option<SocketAddr>) -> anyhow::Result<()> {
+async fn run_relay_loop(port: u16, mut stop_signal: tokio::sync::broadcast::Receiver<()>, initial_external_peer: Option<SocketAddr>) -> anyhow::Result<()> {
     let addr = format!("0.0.0.0:{}", port);
     let socket = UdpSocket::bind(&addr).await?;
     let mut buf = [0u8; 4096];
 
-    let mut peer_external: Option<SocketAddr> = initial_peer;
+    let mut peer_external: Option<SocketAddr> = initial_external_peer;
     let mut peer_internal: Option<SocketAddr> = None;
     
     let mut packets_forwarded = 0u64;
+    let mut packets_dropped = 0u64;
     let mut last_log_time = std::time::Instant::now();
     let timeout = Duration::from_secs(60); 
 
     loop {
         if last_log_time.elapsed() > Duration::from_secs(5) {
-            if packets_forwarded > 0 {
-                debug!("📊 Relay [{}]: Son 5sn {} pkt. Ext={:?} <-> Int={:?}", 
-                    port, packets_forwarded, peer_external, peer_internal);
-                packets_forwarded = 0;
-            }
+            debug!("📊 Relay [{}]: Fwd={} Drop={} | Ext={:?} <-> Int={:?}", 
+                port, packets_forwarded, packets_dropped, peer_external, peer_internal);
             last_log_time = std::time::Instant::now();
         }
 
@@ -127,25 +144,47 @@ async fn run_relay_loop(port: u16, mut stop_signal: tokio::sync::broadcast::Rece
                     Ok(Ok((len, src))) => {
                         let is_internal = is_internal_ip(src.ip());
 
-                        let target = if is_internal {
+                        // LATCHING MANTIĞI
+                        if is_internal {
+                            // İçeriden (Media Service'den) paket geldi.
                             if peer_internal != Some(src) {
                                 info!("🏢 [LATCH-INT] İç Bacak (Media) Kilitlendi: {}", src);
                                 peer_internal = Some(src);
                             }
-                            peer_external // Hedef her zaman dışarı
-                        } else {
-                            if peer_external != Some(src) {
-                                info!("🌍 [LATCH-EXT] Dış Bacak (Client) Kilitlendi: {} (Eski: {:?})", src, peer_external);
-                                peer_external = Some(src); // Gerçek paket gelince SDP adayını ez!
-                            }
-                            peer_internal
-                        };
-
-                        if let Some(dst) = target {
-                            if let Err(e) = socket.send_to(&buf[..len], dst).await {
-                                trace!("RTP Send Error [{}->{}]: {}", port, dst, e);
+                            
+                            // Eğer dış bacak (Client) henüz kilitlenmediyse, paketi nereye atacağız?
+                            // Atamayız. DROP etmeliyiz.
+                            if let Some(dst) = peer_external {
+                                if let Err(e) = socket.send_to(&buf[..len], dst).await {
+                                    trace!("RTP Send Error (Ext): {}", e);
+                                } else {
+                                    packets_forwarded += 1;
+                                }
                             } else {
-                                packets_forwarded += 1;
+                                // STRICT LATCHING: Hedef yoksa atma.
+                                packets_dropped += 1;
+                                if packets_dropped % 100 == 0 {
+                                    debug!("⏳ [WAITING-CLIENT] Client henüz RTP göndermedi. {} paket atıldı.", packets_dropped);
+                                }
+                            }
+
+                        } else {
+                            // Dışarıdan (Client'tan) paket geldi.
+                            if peer_external != Some(src) {
+                                info!("🌍 [LATCH-EXT] Dış Bacak (Client) Kilitlendi: {} (SDP Adayı: {:?})", src, initial_external_peer);
+                                peer_external = Some(src); // Kesinleşmiş adres
+                            }
+
+                            if let Some(dst) = peer_internal {
+                                if let Err(e) = socket.send_to(&buf[..len], dst).await {
+                                    trace!("RTP Send Error (Int): {}", e);
+                                } else {
+                                    packets_forwarded += 1;
+                                }
+                            } else {
+                                // İç bacak henüz hazır değil (Media Service başlatılıyor olabilir)
+                                // Genellikle buraya düşmeyiz çünkü Media Service önce davranır.
+                                packets_dropped += 1;
                             }
                         }
                     }
