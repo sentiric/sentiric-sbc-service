@@ -125,12 +125,13 @@ async fn run_relay_loop(port: u16, mut stop_signal: tokio::sync::broadcast::Rece
     let mut peer_internal: Option<SocketAddr> = None;
     
     let mut packets_forwarded = 0u64;
-    let mut packets_dropped = 0u64;
+    let mut packets_dropped = 0u64; // İstatistik için
     let mut last_log_time = std::time::Instant::now();
     let timeout = Duration::from_secs(60); 
 
     loop {
         if last_log_time.elapsed() > Duration::from_secs(5) {
+            // [OBSERVABILITY]: Dropped packet istatistiğini de ekle
             debug!("📊 Relay [{}]: Fwd={} Drop={} | Ext={:?} <-> Int={:?}", 
                 port, packets_forwarded, packets_dropped, peer_external, peer_internal);
             last_log_time = std::time::Instant::now();
@@ -144,16 +145,15 @@ async fn run_relay_loop(port: u16, mut stop_signal: tokio::sync::broadcast::Rece
                     Ok(Ok((len, src))) => {
                         let is_internal = is_internal_ip(src.ip());
 
-                        // LATCHING MANTIĞI
                         if is_internal {
-                            // İçeriden (Media Service'den) paket geldi.
+                            // İçeriden (Media Service) gelen paket
                             if peer_internal != Some(src) {
-                                info!("🏢 [LATCH-INT] İç Bacak (Media) Kilitlendi: {}", src);
+                                info!("🏢 [LATCH-INT] İç Bacak Kilitlendi: {}", src);
                                 peer_internal = Some(src);
                             }
                             
-                            // Eğer dış bacak (Client) henüz kilitlenmediyse, paketi nereye atacağız?
-                            // Atamayız. DROP etmeliyiz.
+                            // [STRICT LATCHING]: Dış bacak (Client) henüz kilitlenmediyse,
+                            // paketi DROP et. Asla körlemesine gönderme.
                             if let Some(dst) = peer_external {
                                 if let Err(e) = socket.send_to(&buf[..len], dst).await {
                                     trace!("RTP Send Error (Ext): {}", e);
@@ -161,18 +161,17 @@ async fn run_relay_loop(port: u16, mut stop_signal: tokio::sync::broadcast::Rece
                                     packets_forwarded += 1;
                                 }
                             } else {
-                                // STRICT LATCHING: Hedef yoksa atma.
                                 packets_dropped += 1;
-                                if packets_dropped % 100 == 0 {
-                                    debug!("⏳ [WAITING-CLIENT] Client henüz RTP göndermedi. {} paket atıldı.", packets_dropped);
+                                // İlk 5 pakette bir veya her 100. pakette bir uyar
+                                if packets_dropped < 5 || packets_dropped % 100 == 0 {
+                                    debug!("⏳ [WAITING-CLIENT] Client henüz RTP göndermedi. Paket atıldı (Total: {}).", packets_dropped);
                                 }
                             }
-
                         } else {
-                            // Dışarıdan (Client'tan) paket geldi.
+                            // Dışarıdan (Client) gelen paket
                             if peer_external != Some(src) {
-                                info!("🌍 [LATCH-EXT] Dış Bacak (Client) Kilitlendi: {} (SDP Adayı: {:?})", src, initial_external_peer);
-                                peer_external = Some(src); // Kesinleşmiş adres
+                                info!("🌍 [LATCH-EXT] Dış Bacak Kilitlendi: {} (SDP Adayı: {:?})", src, initial_external_peer);
+                                peer_external = Some(src); // Adres kilitlendi
                             }
 
                             if let Some(dst) = peer_internal {
@@ -182,8 +181,7 @@ async fn run_relay_loop(port: u16, mut stop_signal: tokio::sync::broadcast::Rece
                                     packets_forwarded += 1;
                                 }
                             } else {
-                                // İç bacak henüz hazır değil (Media Service başlatılıyor olabilir)
-                                // Genellikle buraya düşmeyiz çünkü Media Service önce davranır.
+                                // Media Service henüz hazır değilse (nadir), bunu da say
                                 packets_dropped += 1;
                             }
                         }
