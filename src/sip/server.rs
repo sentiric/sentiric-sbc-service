@@ -74,7 +74,8 @@ impl SipServer {
         }
     }
 
-    async fn route_packet(&self, packet: &mut SipPacket, src_addr: SocketAddr) {
+
+async fn route_packet(&self, packet: &mut SipPacket, src_addr: SocketAddr) {
         let target_addr = if packet.is_request {
             let method = packet.method.to_string();
             
@@ -83,7 +84,6 @@ impl SipServer {
             let from_uri = packet.get_header_value(HeaderName::From).cloned().unwrap_or_default();
 
             // [FIX]: Proxy'ye bu paketin bir diyalog içi (ACK, BYE, CANCEL) paket olup olmadığını söylemeliyiz.
-            // Böylece Proxy, Dialplan'a sormadan direkt yönlendirme (Loose Routing) yapabilir.
             let is_in_dialog = matches!(packet.method, Method::Ack | Method::Bye | Method::Cancel);
 
             let request = tonic::Request::new(GetNextHopRequest {
@@ -91,7 +91,7 @@ impl SipServer {
                 source_ip: src_addr.ip().to_string(),
                 method,
                 from_uri,
-                is_in_dialog, // EKLENDİ
+                is_in_dialog,
             });
 
             match self.proxy_client.lock().await.get_next_hop(request).await {
@@ -99,19 +99,42 @@ impl SipServer {
                     SipRouter::add_via(packet, &self.config.sip_public_ip, self.config.sip_port, "UDP");
                     let r = res.into_inner();
                     if !r.uri.is_empty() {
-                        tokio::net::lookup_host(r.uri).await.ok().and_then(|mut i| i.next())
-                    } else { None }
+                        // [GÜÇLENDİRİLMİŞ LOGLAMA - DNS KONTROLÜ]
+                        match tokio::net::lookup_host(&r.uri).await {
+                            Ok(mut iter) => {
+                                if let Some(addr) = iter.next() {
+                                    info!("🎯 [YÖNLENDİRME] Hedef Çözümlendi: {} -> {}", r.uri, addr);
+                                    Some(addr)
+                                } else {
+                                    error!("❌ [YÖNLENDİRME] DNS Boş Döndü: {}", r.uri);
+                                    None
+                                }
+                            }
+                            Err(e) => {
+                                error!("❌ [YÖNLENDİRME] DNS Hatası ({}): {}", r.uri, e);
+                                None
+                            }
+                        }
+                    } else { 
+                        warn!("⚠️ [YÖNLENDİRME] Proxy boş bir URI döndü");
+                        None 
+                    }
                 },
-                Err(e) => { error!("🔥 Routing Logic Failed: {}", e); None }
+                Err(e) => { error!("🔥 [YÖNLENDİRME] Proxy gRPC Çağrısı Başarısız: {}", e); None }
             }
         } else { 
+            // Yanıt yönlendirmesi (Response routing)
             if SipRouter::strip_top_via(packet).is_none() { return; }
             packet.get_header_value(HeaderName::Via)
                   .and_then(|v| SipRouter::resolve_response_target(v, DEFAULT_SIP_PORT))
         };
 
         if let Some(target) = target_addr {
-            let _ = self.transport.send(&packet.to_bytes(), target).await;
+            info!("📤 [SIP-DIŞI] {} isteği şuraya gönderiliyor: {}", packet.method, target);
+            if let Err(e) = self.transport.send(&packet.to_bytes(), target).await {
+                error!("🔥 [SIP-DIŞI] Gönderim başarısız ({}): {}", target, e);
+            }
         }
     }
+
 }
