@@ -9,7 +9,7 @@ use crate::rtp::engine::RtpEngine;
 use crate::sip::handlers::security::SecurityHandler;
 use crate::sip::handlers::packet::PacketHandler;
 use crate::sip::handlers::media::MediaHandler;
-use tracing::{info, debug, warn}; 
+use tracing::debug; // info kaldırıldı, uyarı giderildi
 
 pub enum SipAction {
     Forward(SipPacket),
@@ -42,15 +42,16 @@ impl SbcEngine {
             self.fix_request_uri_for_internal(&mut packet);
         }
 
-        // [ÖNEMLİ]: Yanıtlarda (Response) mutlak temizlik
+        // 1. ÖNCE SDP İŞLE (RTP Portları belirlensin)
+        if !self.media.process_sdp(&mut packet).await {
+            return SipAction::Drop;
+        }
+
+        // 2. [KRİTİK]: YANITLARDA TOPOLOJİ GİZLEME (EN SON İŞLEM)
         if packet.is_response() {
             self.force_public_topology(&mut packet);
         }
 
-        if !self.media.process_sdp(&mut packet).await {
-            return SipAction::Drop;
-        }
-        
         if packet.method == Method::Bye {
             let call_id = packet.get_header_value(HeaderName::CallId).cloned().unwrap_or_default();
             let _ = self.rtp_engine.release_relay_by_call_id(&call_id).await;
@@ -60,17 +61,21 @@ impl SbcEngine {
     }
 
     fn force_public_topology(&self, packet: &mut SipPacket) {
-        // 1. Tüm Contact başlıklarını sil ve 5060 ile yeniden oluştur
-        packet.headers.retain(|h| h.name != HeaderName::Contact);
-        let clean_contact = format!("<sip:b2bua@{}:{}>", self.config.sip_public_ip, self.config.sip_advertised_port);
+        // Mevcut tüm Contact ve Record-Route başlıklarını sil
+        packet.headers.retain(|h| h.name != HeaderName::Contact && h.name != HeaderName::RecordRoute);
+
+        let public_ip = &self.config.sip_public_ip;
+        let public_port = self.config.sip_advertised_port; 
+
+        // Sadece dış IP ve 5060 portunu içeren tek bir Contact ekle
+        let clean_contact = format!("<sip:b2bua@{}:{}>", public_ip, public_port);
         packet.headers.push(Header::new(HeaderName::Contact, clean_contact));
         
-        // 2. [YENİ]: Yanıtlarda Record-Route varsa onları da dış IP'ye çevir
-        for h in &mut packet.headers {
-            if h.name == HeaderName::RecordRoute {
-                h.value = format!("<sip:{}:{};lr>", self.config.sip_public_ip, self.config.sip_advertised_port);
-            }
-        }
+        // Loose Routing için Record-Route ekle (Dış IP ile)
+        let rr_value = format!("<sip:{}:{};lr>", public_ip, public_port);
+        packet.headers.insert(0, Header::new(HeaderName::RecordRoute, rr_value));
+
+        debug!("🛡️ [TOPOLOJİ] Dış kimlik kilitlendi: {}:{}", public_ip, public_port);
     }
 
     fn fix_request_uri_for_internal(&self, packet: &mut SipPacket) {

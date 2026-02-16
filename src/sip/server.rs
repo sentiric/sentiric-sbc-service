@@ -68,10 +68,11 @@ impl SipServer {
 
     async fn route_packet(&self, packet: &mut SipPacket, src_addr: SocketAddr) {
         let target_addr = if packet.is_request {
-            // ... [İstek yönlendirme mantığı aynı kalıyor] ...
+            // İSTEK YÖNLENDİRME (GCP -> Antalya)
             let dest_uri = packet.uri.clone();
             let from_uri = packet.get_header_value(HeaderName::From).cloned().unwrap_or_default();
             let is_in_dialog = matches!(packet.method, Method::Ack | Method::Bye | Method::Cancel);
+            
             let request = tonic::Request::new(GetNextHopRequest {
                 destination_uri: dest_uri, source_ip: src_addr.ip().to_string(),
                 method: packet.method.to_string(), from_uri, is_in_dialog,
@@ -80,16 +81,23 @@ impl SipServer {
             match self.proxy_client.lock().await.get_next_hop(request).await {
                 Ok(res) => {
                     let r = res.into_inner();
+                    // Antalya'ya giderken Via ekle
                     SipRouter::add_via(packet, &self.config.sip_public_ip, self.config.sip_port, "UDP");
                     tokio::net::lookup_host(&r.uri).await.ok().and_then(|mut i| i.next())
                 },
                 Err(_) => None
             }
         } else { 
-            // [KRİTİK DÜZELTME]: Yanıtlarda Via Silme
-            // Kendi eklediğimiz Via başlığını siliyoruz ki istemci şaşırmasın.
-            if SipRouter::strip_top_via(packet).is_none() {
-                debug!("⚠️ Yanıtta silinecek Via bulunamadı.");
+            // YANIT YÖNLENDİRME (Antalya -> GCP -> Dış Dünya)
+            
+            // [KRİTİK]: Dışarı çıkarken kendi Via'mızı siliyoruz.
+            // Baresip en üstte kendi Via'sını görmezse 'Protocol Error' verir.
+            while let Some(top_via) = packet.get_header_value(HeaderName::Via) {
+                if top_via.contains(&self.config.sip_public_ip) || top_via.contains("sbc") {
+                    SipRouter::strip_top_via(packet);
+                } else {
+                    break; 
+                }
             }
             
             packet.get_header_value(HeaderName::Via)
@@ -97,7 +105,9 @@ impl SipServer {
         };
 
         if let Some(target) = target_addr {
+            debug!("📤 [SIP-OUT] Sending {} to {}", packet.method, target);
             let _ = self.transport.send(&packet.to_bytes(), target).await;
         }
     }
+
 }
