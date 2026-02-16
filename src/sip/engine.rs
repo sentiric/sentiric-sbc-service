@@ -1,6 +1,6 @@
 // sentiric-sbc-service/src/sip/engine.rs
 
-use sentiric_sip_core::{SipPacket, SipRouter, HeaderName, Method}; 
+use sentiric_sip_core::{SipPacket, SipRouter, HeaderName, Header, Method}; 
 use sentiric_sip_core::utils as sip_utils;
 use std::sync::Arc;
 use std::net::SocketAddr;
@@ -34,88 +34,70 @@ impl SbcEngine {
     }
 
     pub async fn inspect(&self, mut packet: SipPacket, src_addr: SocketAddr) -> SipAction {
-        if packet.method == Method::Invite || packet.method == Method::Bye {
-            info!("📥 [SBC-GİRİŞ] Paket Geldi: {} - Kaynak: {}", packet.method, src_addr);
-        } else {
-            debug!("📥 [SBC-GİRİŞ] Paket Geldi: {} - Kaynak: {}", packet.method, src_addr);
-        }
-
-        // 1. Güvenlik Kontrolleri
+        // 1. Güvenlik ve Temel NAT İşlemleri
         if !self.security.check_access(src_addr.ip()) { return SipAction::Drop; }
-        if packet.is_request() && !PacketHandler::sanitize(&packet) { return SipAction::Drop; }
-
-        // 2. NAT Düzeltmesi
+        
         if packet.is_request() {
+            if !PacketHandler::sanitize(&packet) { return SipAction::Drop; }
             SipRouter::fix_nat_via(&mut packet, src_addr);
-        }
-
-        // 3. TOPOLOGY HIDING & CONTACT FIX (ÇİFT YÖNLÜ)
-        if packet.is_response() {
-            // Çıkış: İç Port -> Dış Port (Advertised)
-            self.enforce_public_contact(&mut packet);
-        } else if packet.is_request() {
-            // Giriş: Dış Port -> İç Port (ACK/BYE yönlendirmesi için)
+            
+            // Giriş (Ingress): Dışarıdan gelen isteği iç ağa uygun hale getir
             self.fix_request_uri_for_internal(&mut packet);
         }
 
-        // 4. SDP REWRITE & RTP ALLOCATION
+        // 2. [KRİTİK]: Çıkış (Egress) Topoloji Gizleme
+        // Dış dünyaya giden her yanıtta iç IP/Port bilgilerini mutlak olarak maskele.
+        if packet.is_response() {
+            self.force_public_topology(&mut packet);
+        }
+
+        // 3. SDP İşleme (RTCP temizliği burada yapılıyor)
         if !self.media.process_sdp(&mut packet).await {
             return SipAction::Drop;
         }
         
-        // 5. Kaynak Temizliği (BYE)
+        // 4. Çağrı Sonlandırma (BYE) Kaynak Temizliği
         if packet.method == Method::Bye {
             let call_id = packet.get_header_value(HeaderName::CallId).cloned().unwrap_or_default();
-            if self.rtp_engine.release_relay_by_call_id(&call_id).await {
-                info!("♻️ [RTP-TEMİZLİK] Çağrı bitti, portlar serbest bırakıldı. CallID: {}", call_id);
-            }
+            let _ = self.rtp_engine.release_relay_by_call_id(&call_id).await;
         }
         
         SipAction::Forward(packet)
     }
 
-    /// [EGRESS FIX]: Contact başlığını kesinlikle Public IP/Port'a zorlar.
-    fn enforce_public_contact(&self, packet: &mut SipPacket) {
+    /// Tüm Contact başlıklarını siler ve Sentiric Edge standartlarında tek bir tane ekler.
+    fn force_public_topology(&self, packet: &mut SipPacket) {
+        // Mevcut tüm Contact başlıklarını temizle
+        packet.headers.retain(|h| h.name != HeaderName::Contact);
+
         let public_ip = &self.config.sip_public_ip;
         let public_port = self.config.sip_advertised_port; 
-        let target_signature = format!("{}:{}", public_ip, public_port);
 
-        if let Some(contact) = packet.get_header_value(HeaderName::Contact) {
-            if contact.contains(&target_signature) { return; }
-
-            let internal_port = self.config.b2bua_internal_port.to_string();
-            
-            // Eğer Contact, iç ağdaki B2BUA'yı veya herhangi bir iç portu gösteriyorsa maskele.
-            if contact.contains("b2bua") || contact.contains(&internal_port) {
-                let user_part = sip_utils::extract_username_from_uri(contact);
-                let new_contact = format!("<sip:{}@{}:{}>", user_part, public_ip, public_port);
-                
-                info!("🛡️ [TOPOLOJİ-GİZLEME] Contact Maskelendi: {} -> {}", contact, new_contact);
-                
-                for h in &mut packet.headers {
-                    if h.name == HeaderName::Contact {
-                        h.value = new_contact.clone();
-                        break;
-                    }
-                }
-            }
-        }
+        // Tertemiz, dış portu 5060 olan yeni başlık
+        let clean_contact = format!("<sip:b2bua@{}:{}>", public_ip, public_port);
+        packet.headers.push(Header::new(HeaderName::Contact, clean_contact));
+        
+        debug!("🛡️ [TOPOLOJİ] Contact Header maskelendi -> {}:{}", public_ip, public_port);
     }
 
-    /// [INGRESS FIX]: Dışarıdan gelen ACK/BYE isteklerinin Request-URI'sini iç servise düzeltir.
+    /// İçeriye (B2BUA/Antalya) giden isteklerin portlarını düzeltir.
     fn fix_request_uri_for_internal(&self, packet: &mut SipPacket) {
         let user = sip_utils::extract_username_from_uri(&packet.uri);
-        // Sadece 'b2bua' kullanıcısı için (Echo Test vb.)
         if user != "b2bua" { return; }
 
         let public_port_str = format!(":{}", self.config.sip_advertised_port);
         let internal_port = self.config.b2bua_internal_port;
 
-        // Eğer URI ":5060" içeriyorsa veya hiç port yoksa, ":13084" ile değiştir.
-        if packet.uri.contains(&public_port_str) {
-            let old_uri = packet.uri.clone();
-            packet.uri = packet.uri.replace(&public_port_str, &format!(":{}", internal_port));
-            info!("🔧 [URI-DÜZELTME] Request-URI İç Porta Çevrildi: {} -> {}", old_uri, packet.uri);
+        if packet.uri.contains(&public_port_str) || !packet.uri.contains(':') {
+            // [FIXED]: Unused variable 'old_uri' uyarısı giderildi, log içine alındı.
+            let _old_uri = packet.uri.clone();
+            
+            if packet.uri.contains(':') {
+                packet.uri = packet.uri.replace(&public_port_str, &format!(":{}", internal_port));
+            } else {
+                packet.uri.push_str(&format!(":{}", internal_port));
+            }
+            info!("🔧 [URI-DÜZELTME] {} -> İç Port ({})", _old_uri, internal_port);
         }
     }
 }
