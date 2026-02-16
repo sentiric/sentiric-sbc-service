@@ -6,7 +6,7 @@ use std::sync::Arc;
 use tokio::fs;
 use tokio::sync::Mutex;
 use tonic::transport::{Certificate, Channel, ClientTlsConfig, Identity};
-use tracing::{info, warn, error};
+use tracing::{info, error};
 use std::time::Duration;
 
 // gRPC İstemcisi
