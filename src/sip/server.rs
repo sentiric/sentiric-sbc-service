@@ -74,43 +74,40 @@ impl SipServer {
             let is_in_dialog = matches!(packet.method, Method::Ack | Method::Bye | Method::Cancel);
             
             let request = tonic::Request::new(GetNextHopRequest {
-                destination_uri: dest_uri, 
-                source_ip: src_addr.ip().to_string(),
-                method: packet.method.to_string(), 
-                from_uri, 
-                is_in_dialog,
+                destination_uri: dest_uri, source_ip: src_addr.ip().to_string(),
+                method: packet.method.to_string(), from_uri, is_in_dialog,
             });
 
             match self.proxy_client.lock().await.get_next_hop(request).await {
                 Ok(res) => {
                     let r = res.into_inner();
-                    // Antalya'ya giderken iz bırakıyoruz (Via ekle)
+                    // İçeri giderken Route ve Record-Route başlıklarını temizle
+                    packet.headers.retain(|h| h.name != HeaderName::Route && h.name != HeaderName::RecordRoute);
+                    
                     SipRouter::add_via(packet, &self.config.sip_public_ip, self.config.sip_port, "UDP");
                     tokio::net::lookup_host(&r.uri).await.ok().and_then(|mut i| i.next())
                 },
                 Err(_) => None
             }
         } else { 
-            // YANIT YÖNLENDİRME (Antalya -> GCP -> Baresip)
+            // YANIT YÖNLENDİRME (Antalya -> Baresip)
             
-            // [KRİTİK]: Dışarı çıkarken KENDİ Via başlığımızı silmeliyiz.
-            // Biz Edge node olduğumuz için, gelen yanıttaki EN ÜST Via her zaman bize aittir.
-            // Baresip en üstte kendi Via'sını görmezse 'Protocol Error 71' verir.
+            // [GÜVENLİK]: Yanıtta Route başlığı olamaz, varsa temizle.
+            packet.headers.retain(|h| h.name != HeaderName::Route);
+
+            // [KRİTİK]: Kendi Via başlığımızı (izimizi) siliyoruz.
+            // Yanıtın en üstünde Baresip kendi Via'sını görmeli.
+            SipRouter::strip_top_via(packet);
             
-            if SipRouter::strip_top_via(packet).is_some() {
-                debug!("🛡️  SBC Via başlığı başarıyla temizlendi.");
-            } else {
-                warn!("⚠️  Yanıtta silinecek Via bulunamadı, paket olduğu gibi iletilecek.");
-            }
-            
-            // Bir sonraki hedef (Baresip), kalan en üstteki Via'dan çözülür.
             packet.get_header_value(HeaderName::Via)
                   .and_then(|v| SipRouter::resolve_response_target(v, DEFAULT_SIP_PORT))
         };
 
         if let Some(target) = target_addr {
-            info!("📤 [SIP-DIŞI] {} -> {}", packet.method, target);
-            let _ = self.transport.send(&packet.to_bytes(), target).await;
+            let packet_bytes = packet.to_bytes();
+            // [LOGLAMA]: Hangi IP'ye ne gönderiyoruz?
+            debug!("📤 [SIP-DIŞI] {} -> {}", packet.method, target);
+            let _ = self.transport.send(&packet_bytes, target).await;
         }
     }
 

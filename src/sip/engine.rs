@@ -9,7 +9,7 @@ use crate::rtp::engine::RtpEngine;
 use crate::sip::handlers::security::SecurityHandler;
 use crate::sip::handlers::packet::PacketHandler;
 use crate::sip::handlers::media::MediaHandler;
-use tracing::debug; // info kaldırıldı, uyarı giderildi
+use tracing::debug;
 
 pub enum SipAction {
     Forward(SipPacket),
@@ -42,14 +42,15 @@ impl SbcEngine {
             self.fix_request_uri_for_internal(&mut packet);
         }
 
-        // 1. ÖNCE SDP İŞLE (RTP Portları belirlensin)
+        // 1. Önce Medya/SDP işlemleri
         if !self.media.process_sdp(&mut packet).await {
             return SipAction::Drop;
         }
 
-        // 2. [KRİTİK]: YANITLARDA TOPOLOJİ GİZLEME (EN SON İŞLEM)
-        if packet.is_response() {
-            self.force_public_topology(&mut packet);
+        // 2. [KRİTİK]: Tüm Sinyalleşme İzlerini Sil (Topoloji Gizleme)
+        // İster istek (Request) ister yanıt (Response) olsun, dışarı giden her şey temizlenmeli.
+        if packet.is_response() || (packet.is_request() && src_addr.ip().to_string() != self.config.sip_public_ip) {
+            self.sanitize_headers(&mut packet);
         }
 
         if packet.method == Method::Bye {
@@ -60,23 +61,27 @@ impl SbcEngine {
         SipAction::Forward(packet)
     }
 
-    fn force_public_topology(&self, packet: &mut SipPacket) {
-        // 1. Mevcut tüm Contact ve Record-Route başlıklarını sil
-        packet.headers.retain(|h| h.name != HeaderName::Contact && h.name != HeaderName::RecordRoute);
+    fn sanitize_headers(&self, packet: &mut SipPacket) {
+        // İstemciyi (Baresip) şaşırtacak tüm başlıkları temizle
+        packet.headers.retain(|h| {
+            h.name != HeaderName::Contact && 
+            h.name != HeaderName::RecordRoute && 
+            h.name != HeaderName::Route
+        });
 
         let public_ip = &self.config.sip_public_ip;
         let public_port = self.config.sip_advertised_port; 
 
-        // 2. Yeni Contact (İstemcinin ACK göndereceği yer)
+        // 1. Yeni ve Tek Contact ekle
         let clean_contact = format!("<sip:b2bua@{}:{}>", public_ip, public_port);
         packet.headers.push(Header::new(HeaderName::Contact, clean_contact));
         
-        // 3. Yeni Record-Route (İstemcinin diyaloğu sürdüreceği yer)
-        // lr (loose routing) parametresi kritik.
+        // 2. Record-Route ekle (İstemci sonraki paketleri buraya göndersin diye)
+        // SADECE INVITE ve 200 OK yanıtlarında olması yeterlidir.
         let rr_value = format!("<sip:{}:{};lr>", public_ip, public_port);
         packet.headers.insert(0, Header::new(HeaderName::RecordRoute, rr_value));
 
-        debug!("🛡️ [TOPOLOJİ] Maskelendi: {}:{}", public_ip, public_port);
+        debug!("🛡️ [SANITY] Başlıklar temizlendi ve dış IP ({}) kilitlendi.", public_ip);
     }
 
     fn fix_request_uri_for_internal(&self, packet: &mut SipPacket) {
