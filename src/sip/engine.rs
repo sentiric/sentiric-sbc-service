@@ -61,21 +61,22 @@ impl SbcEngine {
     }
 
     fn force_public_topology(&self, packet: &mut SipPacket) {
-        // Mevcut tüm Contact ve Record-Route başlıklarını sil
+        // 1. Mevcut tüm Contact ve Record-Route başlıklarını sil
         packet.headers.retain(|h| h.name != HeaderName::Contact && h.name != HeaderName::RecordRoute);
 
         let public_ip = &self.config.sip_public_ip;
         let public_port = self.config.sip_advertised_port; 
 
-        // Sadece dış IP ve 5060 portunu içeren tek bir Contact ekle
+        // 2. Yeni Contact (İstemcinin ACK göndereceği yer)
         let clean_contact = format!("<sip:b2bua@{}:{}>", public_ip, public_port);
         packet.headers.push(Header::new(HeaderName::Contact, clean_contact));
         
-        // Loose Routing için Record-Route ekle (Dış IP ile)
+        // 3. Yeni Record-Route (İstemcinin diyaloğu sürdüreceği yer)
+        // lr (loose routing) parametresi kritik.
         let rr_value = format!("<sip:{}:{};lr>", public_ip, public_port);
         packet.headers.insert(0, Header::new(HeaderName::RecordRoute, rr_value));
 
-        debug!("🛡️ [TOPOLOJİ] Dış kimlik kilitlendi: {}:{}", public_ip, public_port);
+        debug!("🛡️ [TOPOLOJİ] Maskelendi: {}:{}", public_ip, public_port);
     }
 
     fn fix_request_uri_for_internal(&self, packet: &mut SipPacket) {
