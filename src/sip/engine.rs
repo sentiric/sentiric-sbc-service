@@ -34,7 +34,6 @@ impl SbcEngine {
     }
 
     pub async fn inspect(&self, mut packet: SipPacket, src_addr: SocketAddr) -> SipAction {
-        // Log kirliliğini önlemek için sadece önemli metodları INFO yapıyoruz
         if packet.method == Method::Invite || packet.method == Method::Bye {
             info!("📥 [SBC-GİRİŞ] Paket Geldi: {} - Kaynak: {}", packet.method, src_addr);
         } else {
@@ -52,10 +51,10 @@ impl SbcEngine {
 
         // 3. TOPOLOGY HIDING & CONTACT FIX (ÇİFT YÖNLÜ)
         if packet.is_response() {
-            // Çıkış: İç Port -> Dış Port
+            // Çıkış: İç Port -> Dış Port (Advertised)
             self.enforce_public_contact(&mut packet);
         } else if packet.is_request() {
-            // Giriş: Dış Port -> İç Port (ACK Döngüsünü Kırmak İçin)
+            // Giriş: Dış Port -> İç Port (ACK/BYE yönlendirmesi için)
             self.fix_request_uri_for_internal(&mut packet);
         }
 
@@ -78,16 +77,16 @@ impl SbcEngine {
     /// [EGRESS FIX]: Contact başlığını kesinlikle Public IP/Port'a zorlar.
     fn enforce_public_contact(&self, packet: &mut SipPacket) {
         let public_ip = &self.config.sip_public_ip;
-        let public_port = self.config.sip_advertised_port; // 5060
+        let public_port = self.config.sip_advertised_port; 
         let target_signature = format!("{}:{}", public_ip, public_port);
 
         if let Some(contact) = packet.get_header_value(HeaderName::Contact) {
             if contact.contains(&target_signature) { return; }
 
-            // B2BUA veya 13084 tespit edilirse maskele
-            // bu tarz tanımları hardcode yerıne confıg den almalı b2bua nın tanımlarını sabıtlemelıyız
-            // yan etkı var ıse ılıglı servıs ve compose dosyaları ıle de guncellemelıyız.
-            if contact.contains("13084") || contact.contains("b2bua") {
+            let internal_port = self.config.b2bua_internal_port.to_string();
+            
+            // Eğer Contact, iç ağdaki B2BUA'yı veya herhangi bir iç portu gösteriyorsa maskele.
+            if contact.contains("b2bua") || contact.contains(&internal_port) {
                 let user_part = sip_utils::extract_username_from_uri(contact);
                 let new_contact = format!("<sip:{}@{}:{}>", user_part, public_ip, public_port);
                 
@@ -104,15 +103,13 @@ impl SbcEngine {
     }
 
     /// [INGRESS FIX]: Dışarıdan gelen ACK/BYE isteklerinin Request-URI'sini iç servise düzeltir.
-    /// B2BUA servisi (13084), kendisine "5060" portuyla gelen bir paketi reddedebilir.
-    /// Bu fonksiyon, paketin hedef portunu tekrar 13084 yaparak B2BUA'nın paketi kabul etmesini sağlar.
     fn fix_request_uri_for_internal(&self, packet: &mut SipPacket) {
         let user = sip_utils::extract_username_from_uri(&packet.uri);
         // Sadece 'b2bua' kullanıcısı için (Echo Test vb.)
         if user != "b2bua" { return; }
 
-        let public_port_str = format!(":{}", self.config.sip_advertised_port); // ":5060"
-        let internal_port = 13084; // B2BUA Standart Portu
+        let public_port_str = format!(":{}", self.config.sip_advertised_port);
+        let internal_port = self.config.b2bua_internal_port;
 
         // Eğer URI ":5060" içeriyorsa veya hiç port yoksa, ":13084" ile değiştir.
         if packet.uri.contains(&public_port_str) {

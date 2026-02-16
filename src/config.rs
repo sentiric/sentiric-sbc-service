@@ -11,13 +11,16 @@ pub struct AppConfig {
     pub sip_bind_ip: String,
     pub sip_port: u16,
     
-    // [YENİ]: Dış dünyaya ilan edilecek port (Contact Header için)
+    // Dış dünyaya ilan edilecek port
     pub sip_advertised_port: u16, 
     
-    pub sip_public_ip: String, // Public IP (34.122...)
-    pub sip_internal_ip: String, // Internal/Tailscale IP (100.67...)
+    pub sip_public_ip: String, // Public IP
+    pub sip_internal_ip: String, // Internal/Tailscale IP
     
     pub proxy_grpc_addr: String, 
+    
+    // [YENİ] B2BUA Hedef Limanı (Hardcode önleme)
+    pub b2bua_internal_port: u16,
     
     // RTP Relay Settings
     pub rtp_start_port: u16,
@@ -40,8 +43,6 @@ impl AppConfig {
         let sip_port_str = env::var("SBC_SERVICE_SIP_PORT").unwrap_or_else(|_| "13094".to_string());
         let sip_port = sip_port_str.parse::<u16>().context("Geçersiz SIP portu")?;
         
-        // [YENİ]: Eğer SBC_ADVERTISED_PORT yoksa varsayılan 5060 kullan.
-        // Bu sayede kod içinde hardcode yapmaktan kurtuluyoruz.
         let advertised_port = env::var("SBC_ADVERTISED_PORT")
             .unwrap_or_else(|_| "5060".to_string())
             .parse::<u16>()
@@ -59,6 +60,11 @@ impl AppConfig {
             .or_else(|_| env::var("NODE_IP"))
             .unwrap_or_else(|_| "127.0.0.1".to_string());
 
+        // [YENİ]
+        let b2bua_port = env::var("B2BUA_SERVICE_SIP_PORT")
+            .unwrap_or_else(|_| "13084".to_string())
+            .parse::<u16>()?;
+
         let rtp_start = env::var("SBC_RTP_START_PORT").unwrap_or_else(|_| "30000".to_string()).parse()?;
         let rtp_end = env::var("SBC_RTP_END_PORT").unwrap_or_else(|_| "30100".to_string()).parse()?;
 
@@ -68,12 +74,13 @@ impl AppConfig {
             
             sip_bind_ip: "0.0.0.0".to_string(),
             sip_port,
-            sip_advertised_port: advertised_port, // Config'e eklendi
+            sip_advertised_port: advertised_port,
             
             sip_public_ip: public_ip,
             sip_internal_ip: internal_ip,
             
             proxy_grpc_addr: proxy_target,
+            b2bua_internal_port: b2bua_port, // Config'e eklendi
             
             rtp_start_port: rtp_start,
             rtp_end_port: rtp_end,
