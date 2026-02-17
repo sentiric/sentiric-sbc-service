@@ -3,14 +3,15 @@
 use crate::config::AppConfig;
 use crate::sip::engine::{SbcEngine, SipAction};
 use crate::rtp::engine::RtpEngine;
-use anyhow::Result;
+use anyhow::{Context, Result};
 use sentiric_sip_core::{parser, SipTransport, SipPacket, HeaderName, SipRouter, builder::SipResponseFactory, Method};
 use std::net::SocketAddr;
 use std::sync::Arc;
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::mpsc;
 use tracing::{error, info, warn, debug};
-use tonic::transport::Channel;
-use sentiric_contracts::sentiric::sip::v1::{proxy_service_client::ProxyServiceClient, GetNextHopRequest};
+// [SİLİNDİ] gRPC bağımlılıkları
+// use tonic::transport::Channel;
+// use sentiric_contracts::sentiric::sip::v1::{proxy_service_client::ProxyServiceClient, GetNextHopRequest};
 
 pub const DEFAULT_SIP_PORT: u16 = 5060;
 
@@ -18,25 +19,34 @@ pub struct SipServer {
     config: Arc<AppConfig>,
     transport: Arc<SipTransport>,
     engine: SbcEngine,
-    proxy_client: Arc<Mutex<ProxyServiceClient<Channel>>>,
+    // [DEĞİŞTİ] Proxy'nin gRPC istemcisi yerine çözümlenmiş SIP adresi
+    proxy_target_addr: SocketAddr,
 }
 
 impl SipServer {
-    pub async fn new(config: Arc<AppConfig>, proxy_client: Arc<Mutex<ProxyServiceClient<Channel>>>) -> Result<Self> {
+    // [DEĞİŞTİ] Artık gRPC istemcisi almıyor.
+    pub async fn new(config: Arc<AppConfig>) -> Result<Self> {
         let bind_addr = format!("{}:{}", config.sip_bind_ip, config.sip_port);
         let transport = SipTransport::new(&bind_addr).await?;
         let rtp_engine = Arc::new(RtpEngine::new(config.rtp_start_port, config.rtp_end_port));
         
+        // [YENİ] Başlangıçta proxy'nin adresini DNS'ten çöz.
+        let proxy_target_addr = tokio::net::lookup_host(&config.proxy_sip_addr)
+            .await?
+            .next()
+            .context("Proxy SIP hedefi çözümlenemedi")?;
+        info!("🎯 Dahili SIP hedefi kilitlendi: {}", proxy_target_addr);
+
         Ok(Self {
             config: config.clone(),
             transport: Arc::new(transport),
             engine: SbcEngine::new(config, rtp_engine),
-            proxy_client,
+            proxy_target_addr,
         })
     }
     
     pub async fn run(self, mut shutdown_rx: mpsc::Receiver<()>) {
-        info!("📡 SBC Aktif (Strict Mode): {}:{}", self.config.sip_bind_ip, self.config.sip_port);
+        info!("📡 SBC Aktif (Symmetric Mode): {}:{}", self.config.sip_bind_ip, self.config.sip_port);
         let mut buf = vec![0u8; 65535];
         let socket = self.transport.get_socket();
 
@@ -53,7 +63,7 @@ impl SipServer {
                                         let _ = self.transport.send(&SipResponseFactory::create_100_trying(&packet).to_bytes(), src_addr).await;
                                     }
                                     if let SipAction::Forward(mut processed) = self.engine.inspect(packet, src_addr).await {
-                                        self.route_packet(&mut processed, src_addr).await;
+                                        self.route_packet(&mut processed).await;
                                     }
                                 },
                                 Err(e) => warn!("⚠️ Bozuk paket: {}", e),
@@ -66,37 +76,16 @@ impl SipServer {
         }
     }
 
-    async fn route_packet(&self, packet: &mut SipPacket, src_addr: SocketAddr) {
+    async fn route_packet(&self, packet: &mut SipPacket) {
         let target_addr = if packet.is_request {
-            // İSTEK YÖNLENDİRME (GCP -> Antalya)
-            let dest_uri = packet.uri.clone();
-            let from_uri = packet.get_header_value(HeaderName::From).cloned().unwrap_or_default();
-            let is_in_dialog = matches!(packet.method, Method::Ack | Method::Bye | Method::Cancel);
-            
-            let request = tonic::Request::new(GetNextHopRequest {
-                destination_uri: dest_uri, source_ip: src_addr.ip().to_string(),
-                method: packet.method.to_string(), from_uri, is_in_dialog,
-            });
-
-            match self.proxy_client.lock().await.get_next_hop(request).await {
-                Ok(res) => {
-                    let r = res.into_inner();
-                    // İçeri giderken Route ve Record-Route başlıklarını temizle
-                    packet.headers.retain(|h| h.name != HeaderName::Route && h.name != HeaderName::RecordRoute);
-                    
-                    SipRouter::add_via(packet, &self.config.sip_public_ip, self.config.sip_port, "UDP");
-                    tokio::net::lookup_host(&r.uri).await.ok().and_then(|mut i| i.next())
-                },
-                Err(_) => None
-            }
+            // İSTEK YÖNLENDİRME (Dışarıdan -> İçeriye)
+            // Artık gRPC yok, pakete kendi Via başlığımızı ekleyip doğrudan proxy'ye gönderiyoruz.
+            SipRouter::add_via(packet, &self.config.sip_internal_ip, self.config.sip_port, "UDP");
+            Some(self.proxy_target_addr)
         } else { 
-            // YANIT YÖNLENDİRME (Antalya -> Baresip)
-            
-            // [GÜVENLİK]: Yanıtta Route başlığı olamaz, varsa temizle.
-            packet.headers.retain(|h| h.name != HeaderName::Route);
-
-            // [KRİTİK]: Kendi Via başlığımızı (izimizi) siliyoruz.
-            // Yanıtın en üstünde Baresip kendi Via'sını görmeli.
+            // YANIT YÖNLENDİRME (İçeriden -> Dışarıya)
+            // Kendi Via başlığımızı (izimizi) siliyoruz.
+            // Yanıtın en üstünde istemcinin (Baresip) kendi Via'sı kalmalı.
             SipRouter::strip_top_via(packet);
             
             packet.get_header_value(HeaderName::Via)
@@ -105,9 +94,12 @@ impl SipServer {
 
         if let Some(target) = target_addr {
             let packet_bytes = packet.to_bytes();
-            // [LOGLAMA]: Hangi IP'ye ne gönderiyoruz?
-            debug!("📤 [SIP-DIŞI] {} -> {}", packet.method, target);
-            let _ = self.transport.send(&packet_bytes, target).await;
+            debug!("📤 [SBC-ROUTE] SIP Packet Forwarding: {} -> {}", packet.method, target);
+            if let Err(e) = self.transport.send(&packet_bytes, target).await {
+                error!("🔥 SIP paketi gönderilemedi {}: {}", target, e);
+            }
+        } else {
+            warn!("⚠️ Rota bulunamadı, paket atlandı. Method: {}", packet.method);
         }
     }
 

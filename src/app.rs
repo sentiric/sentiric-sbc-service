@@ -1,6 +1,6 @@
 // sentiric-sbc-service/src/app.rs
 use crate::config::AppConfig;
-use crate::grpc::client::ProxyClient;
+// [SİLİNDİ] use crate::grpc::client::ProxyClient;
 use crate::grpc::service::MySbcService;
 use crate::sip::server::SipServer;
 use crate::tls::load_server_tls_config;
@@ -41,7 +41,6 @@ impl App {
         let env_filter = EnvFilter::try_from_default_env().or_else(|_| EnvFilter::try_new(&rust_log_env))?;
         let subscriber = Registry::default().with(env_filter);
         
-        // [DEĞİŞİKLİK BURADA: LOG FORMATI]
         if config.env == "production" {
             subscriber.with(fmt::layer().json()).init();
         } else {
@@ -63,14 +62,13 @@ impl App {
         let (sip_shutdown_tx, sip_shutdown_rx) = mpsc::channel(1);
         let (http_shutdown_tx, http_shutdown_rx) = tokio::sync::oneshot::channel();
 
-        // --- gRPC İstemcisini Başlat (Proxy Service'e) ---
-        let proxy_client = ProxyClient::connect(self.config.clone())
-            .await
-            .context("Proxy Service gRPC istemcisi başlatılamadı")?;
+        // [SİLİNDİ] --- gRPC İstemcisini Başlat (Proxy Service'e) ---
+        // ProxyClient bağımlılığı artık yok.
 
         // --- SIP Sunucusunu Başlat ---
         let sip_config = self.config.clone();
-        let sip_server = SipServer::new(sip_config, proxy_client).await?;
+        // [DEĞİŞTİ] SipServer artık gRPC client istemiyor.
+        let sip_server = SipServer::new(sip_config).await?;
         let sip_handle = tokio::spawn(async move {
             sip_server.run(sip_shutdown_rx).await;
         });

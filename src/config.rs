@@ -17,7 +17,8 @@ pub struct AppConfig {
     pub sip_public_ip: String, // Public IP
     pub sip_internal_ip: String, // Internal/Tailscale IP
     
-    pub proxy_grpc_addr: String, 
+    // [DEĞİŞTİ] gRPC yerine SIP/UDP hedefi
+    pub proxy_sip_addr: String, 
     
     // [YENİ] B2BUA Hedef Limanı (Hardcode önleme)
     pub b2bua_internal_port: u16,
@@ -51,8 +52,9 @@ impl AppConfig {
         let grpc_addr: SocketAddr = format!("[::]:{}", grpc_port).parse()?;
         let http_addr: SocketAddr = format!("[::]:{}", http_port).parse()?;
         
-        let proxy_target = env::var("PROXY_SERVICE_GRPC_TARGET")
-            .context("ZORUNLU: PROXY_SERVICE_GRPC_TARGET eksik")?;
+        // [DEĞİŞTİ] gRPC yerine SIP/UDP hedefi okunuyor.
+        let proxy_target = env::var("PROXY_SERVICE_SIP_TARGET")
+            .context("ZORUNLU: PROXY_SERVICE_SIP_TARGET eksik")?;
 
         let public_ip = env::var("SBC_SERVICE_PUBLIC_IP").unwrap_or_else(|_| "127.0.0.1".to_string());
         
@@ -60,7 +62,6 @@ impl AppConfig {
             .or_else(|_| env::var("NODE_IP"))
             .unwrap_or_else(|_| "127.0.0.1".to_string());
 
-        // [YENİ]
         let b2bua_port = env::var("B2BUA_SERVICE_SIP_PORT")
             .unwrap_or_else(|_| "13084".to_string())
             .parse::<u16>()?;
@@ -79,8 +80,8 @@ impl AppConfig {
             sip_public_ip: public_ip,
             sip_internal_ip: internal_ip,
             
-            proxy_grpc_addr: proxy_target,
-            b2bua_internal_port: b2bua_port, // Config'e eklendi
+            proxy_sip_addr: proxy_target,
+            b2bua_internal_port: b2bua_port,
             
             rtp_start_port: rtp_start,
             rtp_end_port: rtp_end,
