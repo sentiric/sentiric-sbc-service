@@ -62,27 +62,24 @@ impl SipServer {
         }
     }
 
-    async fn route_packet(&self, packet: &mut SipPacket, _src_addr: SocketAddr) {
+    async fn route_packet(&self, packet: &mut SipPacket, src_addr: SocketAddr) {
         let target_addr = if packet.is_request() {
             // İSTEK YÖNLENDİRME (Dış -> İç)
-            packet.headers.retain(|h| h.name != HeaderName::Route && h.name != HeaderName::RecordRoute);
-            SipRouter::add_via(packet, &self.config.sip_public_ip, self.config.sip_port, "UDP");
-
-            // Proxy hedefini DNS üzerinden çöz (Asenkron)
+            // Engine zaten Via'yı ekledi veya düzeltti. Doğrudan Proxy'ye gönder.
             tokio::net::lookup_host(&self.config.proxy_sip_addr).await.ok().and_then(|mut i| i.next())
         } else { 
             // YANIT YÖNLENDİRME (İç -> Dış)
-            SipRouter::strip_top_via(packet);
+            // Engine (apply_nuclear_sanitization) Via yığınını %100 temizledi.
+            // Pakette sadece 1 adet Via (istemcininki) kaldı. 
+            // Bu yüzden strip_top_via YAPMIYORUZ. Doğrudan hedefi çözüyoruz.
             packet.get_header_value(HeaderName::Via)
                   .and_then(|v| SipRouter::resolve_response_target(v, DEFAULT_SIP_PORT))
         };
 
         if let Some(target) = target_addr {
             let packet_bytes = packet.to_bytes();
-            debug!("📤 [SBC-EGRESS] {} -> {}", packet.method, target);
-            if let Err(e) = self.transport.send(&packet_bytes, target).await {
-                error!("🔥 SIP gönderim hatası {}: {}", target, e);
-            }
+            info!("📤 [SBC-EGRESS] {} -> {}", packet.method, target);
+            let _ = self.transport.send(&packet_bytes, target).await;
         }
     }
 }
