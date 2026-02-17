@@ -3,12 +3,12 @@
 use crate::config::AppConfig;
 use crate::sip::engine::{SbcEngine, SipAction};
 use crate::rtp::engine::RtpEngine;
-use anyhow::Result;
+use anyhow::{Context, Result};
 use sentiric_sip_core::{parser, SipTransport, SipPacket, HeaderName, SipRouter, builder::SipResponseFactory, Method};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::mpsc;
-use tracing::{error, info, warn, debug};
+use tracing::{error, info, warn}; // [TEMİZLENDİ]: debug kaldırıldı
 
 pub const DEFAULT_SIP_PORT: u16 = 5060;
 
@@ -16,6 +16,7 @@ pub struct SipServer {
     config: Arc<AppConfig>,
     transport: Arc<SipTransport>,
     engine: SbcEngine,
+    proxy_target_addr: SocketAddr,
 }
 
 impl SipServer {
@@ -24,15 +25,22 @@ impl SipServer {
         let transport = SipTransport::new(&bind_addr).await?;
         let rtp_engine = Arc::new(RtpEngine::new(config.rtp_start_port, config.rtp_end_port));
         
+        let proxy_target_addr = tokio::net::lookup_host(&config.proxy_sip_addr)
+            .await?
+            .next()
+            .context("Proxy SIP hedefi çözümlenemedi")?;
+        info!("🎯 Dahili SIP hedefi kilitlendi: {}", proxy_target_addr);
+
         Ok(Self {
             config: config.clone(),
             transport: Arc::new(transport),
             engine: SbcEngine::new(config, rtp_engine),
+            proxy_target_addr,
         })
     }
     
     pub async fn run(self, mut shutdown_rx: mpsc::Receiver<()>) {
-        info!("📡 SBC Aktif (Strict Mode): {}:{}", self.config.sip_bind_ip, self.config.sip_port);
+        info!("📡 SBC Aktif (Strict Topology Hiding): {}:{}", self.config.sip_bind_ip, self.config.sip_port);
         let mut buf = vec![0u8; 65535];
         let socket = self.transport.get_socket();
 
@@ -62,16 +70,15 @@ impl SipServer {
         }
     }
 
-    async fn route_packet(&self, packet: &mut SipPacket, src_addr: SocketAddr) {
+    // [TEMİZLENDİ]: _src_addr kullanılarak uyarı giderildi
+    async fn route_packet(&self, packet: &mut SipPacket, _src_addr: SocketAddr) {
         let target_addr = if packet.is_request() {
             // İSTEK YÖNLENDİRME (Dış -> İç)
-            // Engine zaten Via'yı ekledi veya düzeltti. Doğrudan Proxy'ye gönder.
-            tokio::net::lookup_host(&self.config.proxy_sip_addr).await.ok().and_then(|mut i| i.next())
+            SipRouter::add_via(packet, &self.config.sip_internal_ip, self.config.sip_port, "UDP");
+            Some(self.proxy_target_addr)
         } else { 
             // YANIT YÖNLENDİRME (İç -> Dış)
-            // Engine (apply_nuclear_sanitization) Via yığınını %100 temizledi.
-            // Pakette sadece 1 adet Via (istemcininki) kaldı. 
-            // Bu yüzden strip_top_via YAPMIYORUZ. Doğrudan hedefi çözüyoruz.
+            // Engine tarafında Via yığını temizlendi, en üstte kalan istemci Via'sını kullan.
             packet.get_header_value(HeaderName::Via)
                   .and_then(|v| SipRouter::resolve_response_target(v, DEFAULT_SIP_PORT))
         };

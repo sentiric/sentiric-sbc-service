@@ -5,31 +5,32 @@ use tokio::net::UdpSocket;
 use dashmap::DashMap;
 use std::net::{SocketAddr, IpAddr};
 use std::time::Duration;
-use tracing::{info, error, debug, warn, trace};
+use tracing::{info, error};
 use rand::Rng;
 
 fn is_internal_ip(ip: IpAddr) -> bool {
     match ip {
         IpAddr::V4(ipv4) => {
             let octets = ipv4.octets();
-            // Docker Gateway (10.88.0.1 vb.) tespiti
-            // Genellikle 10.88.0.1 veya 172.x.0.1 olur.
-            if octets[0] == 10 && octets[1] == 88 && octets[3] == 1 { return true; }
-            
-            // Standart kontroller
-            if octets[0] == 10 { return true; }
+            if octets[0] == 10 && octets[1] == 88 && octets[3] == 1 { return true; } // Docker GW
+            if octets[0] == 10 || octets[0] == 127 { return true; }
             if octets[0] == 172 && (octets[1] >= 16 && octets[1] <= 31) { return true; }
             if octets[0] == 192 && octets[1] == 168 { return true; }
             if octets[0] == 100 && (octets[1] >= 64 && octets[1] <= 127) { return true; }
-            if octets[0] == 127 { return true; }
             false
         }
         IpAddr::V6(ipv6) => ipv6.is_loopback(),
     }
 }
 
+fn is_docker_gateway(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => v4.octets()[3] == 1,
+        _ => false,
+    }
+}
+
 struct RtpRelay {
-    pub local_port: u16,
     stop_signal: tokio::sync::broadcast::Sender<()>,
 }
 
@@ -63,7 +64,7 @@ impl RtpEngine {
 
             if !self.active_relays.contains_key(&port) {
                 let (tx, _) = tokio::sync::broadcast::channel(1);
-                let relay = RtpRelay { local_port: port, stop_signal: tx.clone() };
+                let relay = RtpRelay { stop_signal: tx.clone() };
                 
                 let active_relays_clone = self.active_relays.clone();
                 let call_id_map_clone = self.call_id_map.clone();
@@ -71,26 +72,10 @@ impl RtpEngine {
                 let stop_rx = tx.subscribe();
 
                 tokio::spawn(async move {
-                    // [LATCHING LOGIC START]
-                    // initial_peer, SDP'den gelen 'candidate' adrestir.
-                    // Eğer bu adres Private IP ise ve biz Public IP'de çalışıyorsak, buna güvenemeyiz.
-                    let safe_peer = if let Some(addr) = initial_peer {
-                        if is_internal_ip(addr.ip()) {
-                            warn!("⚠️ [RTP-INIT] SDP adresi Private IP ({}), Strict Latching Modu Aktif.", addr);
-                            None // Güvenilmez, bekle.
-                        } else {
-                            Some(addr)
-                        }
-                    } else {
-                        None
-                    };
-
-                    info!("🚀 RTP Relay Başlatıldı: Port {} | CallID: {} | Initial Target: {:?}", port, call_id_owned, safe_peer);
-                    
-                    if let Err(e) = run_relay_loop(port, stop_rx, safe_peer).await {
-                        error!("🔥 RTP Relay Kritik Hata [{}]: {}", port, e);
+                    info!("🚀 [RTP-RELAY] Başlatıldı: Port {} | CallID: {}", port, call_id_owned);
+                    if let Err(e) = run_relay_loop(port, stop_rx, initial_peer).await {
+                        error!("🔥 [RTP-RELAY] Hata (Port {}): {}", port, e);
                     }
-                    info!("🛑 RTP Relay Durduruldu: Port {}", port);
                     active_relays_clone.remove(&port);
                     call_id_map_clone.remove(&call_id_owned);
                 });
@@ -100,14 +85,12 @@ impl RtpEngine {
                 return Some(port);
             }
         }
-        error!("❌ RTP PORT HAVUZU TÜKENDİ! Aralık: {}-{}", self.start_port, self.end_port);
         None
     }
 
     pub async fn release_relay_by_call_id(&self, call_id: &str) -> bool {
         if let Some((_, port)) = self.call_id_map.remove(call_id) {
             if let Some((_, relay)) = self.active_relays.remove(&port) {
-                info!("♻️ Kaynak Temizliği: Relay Port {} serbest bırakılıyor (CallID: {})", relay.local_port, call_id);
                 let _ = relay.stop_signal.send(());
                 return true;
             }
@@ -119,78 +102,36 @@ impl RtpEngine {
 async fn run_relay_loop(port: u16, mut stop_signal: tokio::sync::broadcast::Receiver<()>, initial_external_peer: Option<SocketAddr>) -> anyhow::Result<()> {
     let addr = format!("0.0.0.0:{}", port);
     let socket = UdpSocket::bind(&addr).await?;
-    let mut buf = [0u8; 4096];
-
-    let mut peer_external: Option<SocketAddr> = initial_external_peer;
+    let mut buf = [0u8; 2048];
+    let mut peer_external = initial_external_peer;
     let mut peer_internal: Option<SocketAddr> = None;
-    
-    let mut packets_forwarded = 0u64;
-    let mut packets_dropped = 0u64; // İstatistik için
-    let mut last_log_time = std::time::Instant::now();
     let timeout = Duration::from_secs(60); 
 
     loop {
-        if last_log_time.elapsed() > Duration::from_secs(5) {
-            // [OBSERVABILITY]: Dropped packet istatistiğini de ekle
-            debug!("📊 Relay [{}]: Fwd={} Drop={} | Ext={:?} <-> Int={:?}", 
-                port, packets_forwarded, packets_dropped, peer_external, peer_internal);
-            last_log_time = std::time::Instant::now();
-        }
-
         tokio::select! {
             _ = stop_signal.recv() => break,
-            
             res = tokio::time::timeout(timeout, socket.recv_from(&mut buf)) => {
                 match res {
                     Ok(Ok((len, src))) => {
                         let is_internal = is_internal_ip(src.ip());
-
                         if is_internal {
-                            // İçeriden (Media Service) gelen paket
                             if peer_internal != Some(src) {
-                                info!("🏢 [LATCH-INT] İç Bacak Kilitlendi: {}", src);
-                                peer_internal = Some(src);
-                            }
-                            
-                            // [STRICT LATCHING]: Dış bacak (Client) henüz kilitlenmediyse,
-                            // paketi DROP et. Asla körlemesine gönderme.
-                            if let Some(dst) = peer_external {
-                                if let Err(e) = socket.send_to(&buf[..len], dst).await {
-                                    trace!("RTP Send Error (Ext): {}", e);
-                                } else {
-                                    packets_forwarded += 1;
-                                }
-                            } else {
-                                packets_dropped += 1;
-                                // İlk 5 pakette bir veya her 100. pakette bir uyar
-                                if packets_dropped < 5 || packets_dropped % 100 == 0 {
-                                    debug!("⏳ [WAITING-CLIENT] Client henüz RTP göndermedi. Paket atıldı (Total: {}).", packets_dropped);
+                                if !(is_docker_gateway(src.ip()) && peer_internal.is_some()) {
+                                    info!("🏢 [LATCH-INT] İç Bacak Kilitlendi: {}", src);
+                                    peer_internal = Some(src);
                                 }
                             }
+                            if let Some(dst) = peer_external { let _ = socket.send_to(&buf[..len], dst).await; }
                         } else {
-                            // Dışarıdan (Client) gelen paket
                             if peer_external != Some(src) {
-                                info!("🌍 [LATCH-EXT] Dış Bacak Kilitlendi: {} (SDP Adayı: {:?})", src, initial_external_peer);
-                                peer_external = Some(src); // Adres kilitlendi
+                                info!("🌍 [LATCH-EXT] Dış Bacak Kilitlendi: {}", src);
+                                peer_external = Some(src);
                             }
-
-                            if let Some(dst) = peer_internal {
-                                if let Err(e) = socket.send_to(&buf[..len], dst).await {
-                                    trace!("RTP Send Error (Int): {}", e);
-                                } else {
-                                    packets_forwarded += 1;
-                                }
-                            } else {
-                                // Media Service henüz hazır değilse (nadir), bunu da say
-                                packets_dropped += 1;
-                            }
+                            if let Some(dst) = peer_internal { let _ = socket.send_to(&buf[..len], dst).await; }
                         }
                     }
-                    Ok(Err(e)) => error!("UDP Recv Error: {}", e),
-                    Err(_) => {
-                        warn!("⚠️ RTP Timeout on port {}. Closing relay.", port);
-                        break;
-                    },
+                    Ok(Err(_)) => break,
+                    Err(_) => break,
                 }
             }
         }
