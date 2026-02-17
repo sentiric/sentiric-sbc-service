@@ -12,15 +12,15 @@ fn is_internal_ip(ip: IpAddr) -> bool {
     match ip {
         IpAddr::V4(ipv4) => {
             let octets = ipv4.octets();
-            // 10.0.0.0/8
+            // Docker Gateway (10.88.0.1 vb.) tespiti
+            // Genellikle 10.88.0.1 veya 172.x.0.1 olur.
+            if octets[0] == 10 && octets[1] == 88 && octets[3] == 1 { return true; }
+            
+            // Standart kontroller
             if octets[0] == 10 { return true; }
-            // 172.16.0.0/12 - 172.31.255.255
             if octets[0] == 172 && (octets[1] >= 16 && octets[1] <= 31) { return true; }
-            // 192.168.0.0/16
             if octets[0] == 192 && octets[1] == 168 { return true; }
-            // 100.x.y.z (Tailscale / Carrier Grade NAT)
             if octets[0] == 100 && (octets[1] >= 64 && octets[1] <= 127) { return true; }
-            // Loopback
             if octets[0] == 127 { return true; }
             false
         }
