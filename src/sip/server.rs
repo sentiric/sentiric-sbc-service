@@ -3,7 +3,7 @@
 use crate::config::AppConfig;
 use crate::sip::engine::{SbcEngine, SipAction};
 use crate::rtp::engine::RtpEngine;
-use anyhow::{Context, Result};
+use anyhow::Result;
 use sentiric_sip_core::{parser, SipTransport, SipPacket, HeaderName, SipRouter, builder::SipResponseFactory, Method};
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -16,7 +16,6 @@ pub struct SipServer {
     config: Arc<AppConfig>,
     transport: Arc<SipTransport>,
     engine: SbcEngine,
-    proxy_target_addr: SocketAddr,
 }
 
 impl SipServer {
@@ -25,22 +24,15 @@ impl SipServer {
         let transport = SipTransport::new(&bind_addr).await?;
         let rtp_engine = Arc::new(RtpEngine::new(config.rtp_start_port, config.rtp_end_port));
         
-        let proxy_target_addr = tokio::net::lookup_host(&config.proxy_sip_addr)
-            .await?
-            .next()
-            .context("Proxy SIP hedefi çözümlenemedi")?;
-        info!("🎯 Dahili SIP hedefi kilitlendi: {}", proxy_target_addr);
-
         Ok(Self {
             config: config.clone(),
             transport: Arc::new(transport),
             engine: SbcEngine::new(config, rtp_engine),
-            proxy_target_addr,
         })
     }
     
     pub async fn run(self, mut shutdown_rx: mpsc::Receiver<()>) {
-        info!("📡 SBC Aktif (Strict Topology Hiding): {}:{}", self.config.sip_bind_ip, self.config.sip_port);
+        info!("📡 SBC Aktif (Strict Mode): {}:{}", self.config.sip_bind_ip, self.config.sip_port);
         let mut buf = vec![0u8; 65535];
         let socket = self.transport.get_socket();
 
@@ -57,7 +49,7 @@ impl SipServer {
                                         let _ = self.transport.send(&SipResponseFactory::create_100_trying(&packet).to_bytes(), src_addr).await;
                                     }
                                     if let SipAction::Forward(mut processed) = self.engine.inspect(packet, src_addr).await {
-                                        self.route_packet(&mut processed).await;
+                                        self.route_packet(&mut processed, src_addr).await;
                                     }
                                 },
                                 Err(e) => warn!("⚠️ Bozuk paket: {}", e),
@@ -70,50 +62,17 @@ impl SipServer {
         }
     }
 
-    async fn route_packet(&self, packet: &mut SipPacket) {
-        let target_addr = if packet.is_request {
+    async fn route_packet(&self, packet: &mut SipPacket, _src_addr: SocketAddr) {
+        let target_addr = if packet.is_request() {
             // İSTEK YÖNLENDİRME (Dış -> İç)
-            SipRouter::add_via(packet, &self.config.sip_internal_ip, self.config.sip_port, "UDP");
-            Some(self.proxy_target_addr)
+            packet.headers.retain(|h| h.name != HeaderName::Route && h.name != HeaderName::RecordRoute);
+            SipRouter::add_via(packet, &self.config.sip_public_ip, self.config.sip_port, "UDP");
+
+            // Proxy hedefini DNS üzerinden çöz (Asenkron)
+            tokio::net::lookup_host(&self.config.proxy_sip_addr).await.ok().and_then(|mut i| i.next())
         } else { 
-            // [KRİTİK]: YANIT YÖNLENDİRME (İç -> Dış)
-            // Error 71 ve 482 döngülerini bitiren "Nükleer Temizlik"
-            
-            // 1. İç ağa ait tüm kirliliği (Record-Route, Route) temizle.
-            // Sadece SBC'nin Record-Route başlığı engine tarafında zaten eklendi.
-            packet.headers.retain(|h| {
-                if h.name == HeaderName::RecordRoute || h.name == HeaderName::Route {
-                    // Sadece bizim dış IP'mizi içeren Record-Route kalabilir.
-                    h.value.contains(&self.config.sip_public_ip)
-                } else {
-                    true
-                }
-            });
-
-            // 2. Via başlıklarını temizle. 
-            // RFC 3261: Yanıt yolunda sadece istemcinin Via'sı kalana kadar üsttekiler silinir.
-            // Bizim mimarimizde üstte her zaman 2 Via olur (SBC ve Proxy).
-            
-            // En az bir Via kalana kadar ve en üstteki Via iç ağa ait olduğu sürece sil.
-            loop {
-                let via_count = packet.headers.iter().filter(|h| h.name == HeaderName::Via).count();
-                if via_count <= 1 { break; } // Sadece 1 tane (istemcinin) kalsın.
-
-                if let Some(top_via) = packet.get_header_value(HeaderName::Via) {
-                    if top_via.contains("proxy-service") || 
-                       top_via.contains("b2bua-service") || 
-                       top_via.contains(&self.config.sip_internal_ip) ||
-                       top_via.contains("10.88.") {
-                        SipRouter::strip_top_via(packet);
-                    } else {
-                        break; 
-                    }
-                } else {
-                    break;
-                }
-            }
-
-            // 3. Hedefi istemcinin Via'sından çöz.
+            // YANIT YÖNLENDİRME (İç -> Dış)
+            SipRouter::strip_top_via(packet);
             packet.get_header_value(HeaderName::Via)
                   .and_then(|v| SipRouter::resolve_response_target(v, DEFAULT_SIP_PORT))
         };

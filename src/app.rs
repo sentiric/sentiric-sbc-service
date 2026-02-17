@@ -1,6 +1,5 @@
 // sentiric-sbc-service/src/app.rs
 use crate::config::AppConfig;
-// [SİLİNDİ] use crate::grpc::client::ProxyClient;
 use crate::grpc::service::MySbcService;
 use crate::sip::server::SipServer;
 use crate::tls::load_server_tls_config;
@@ -62,12 +61,9 @@ impl App {
         let (sip_shutdown_tx, sip_shutdown_rx) = mpsc::channel(1);
         let (http_shutdown_tx, http_shutdown_rx) = tokio::sync::oneshot::channel();
 
-        // [SİLİNDİ] --- gRPC İstemcisini Başlat (Proxy Service'e) ---
-        // ProxyClient bağımlılığı artık yok.
-
         // --- SIP Sunucusunu Başlat ---
         let sip_config = self.config.clone();
-        // [DEĞİŞTİ] SipServer artık gRPC client istemiyor.
+        // [GÜNCELLENDİ] Sadece config alıyor, gRPC client bağımlılığı yok.
         let sip_server = SipServer::new(sip_config).await?;
         let sip_handle = tokio::spawn(async move {
             sip_server.run(sip_shutdown_rx).await;
@@ -120,12 +116,8 @@ impl App {
                 if let Err(e) = inner_res { return Err(e); }
                 error!("gRPC sunucusu beklenmedik şekilde sonlandı!");
             },
-            res = http_server_handle => {
-                res.context("HTTP sunucu görevi panic'ledi")?; 
-            },
-            res = sip_handle => {
-                 res.context("SIP sunucu görevi panic'ledi")?;
-            },
+            _res = http_server_handle => { },
+            _res = sip_handle => { },
             _ = ctrl_c => {},
         }
 

@@ -42,14 +42,18 @@ impl SbcEngine {
             self.fix_request_uri_for_internal(&mut packet);
         }
 
-        // 1. Medya/SDP işlemleri
+        // 1. Medya/SDP işlemleri (Relay Port tahsisi vb.)
         if !self.media.process_sdp(&mut packet).await {
             return SipAction::Drop;
         }
 
-        // 2. [KRİTİK]: DIŞARI GİDEN TÜM YANITLARDA TOPOLOJİ GİZLE
-        if packet.is_response() {
-            self.sanitize_headers(&mut packet);
+        // 2. [KRİTİK]: Topoloji Gizleme (Topology Hiding)
+        // İster istek olsun ister yanıt, dışarı (Internet) giden her şey filtrelenmeli.
+        // Dış şebekeye giden paketleri (Response veya Outbound Request) SBC temizler.
+        let is_outbound = packet.is_response() || (packet.is_request() && src_addr.ip().to_string() != self.config.sip_public_ip);
+        
+        if is_outbound {
+            self.apply_nuclear_sanitization(&mut packet);
         }
 
         if packet.method == Method::Bye {
@@ -60,25 +64,49 @@ impl SbcEngine {
         SipAction::Forward(packet)
     }
 
-    fn sanitize_headers(&self, packet: &mut SipPacket) {
-        // [NUCLEAR OPTION]: Tüm kritik başlıkları önce temizle.
+    /// [ANAYASAL TEMİZLİK]: Dış dünyaya giden pakette hiçbir iç ağ izi kalamaz.
+    fn apply_nuclear_sanitization(&self, packet: &mut SipPacket) {
+        let public_ip = &self.config.sip_public_ip;
+        let public_port = self.config.sip_advertised_port;
+
+        // 1. VIA TEMİZLİĞİ: Sadece tek bir Via kalana kadar üsttekileri sil (RFC 3261 compliance)
+        // Yanıtlarda en üstteki Via bizim eklediğimizdir, onu silmeliyiz ki istemci kendi Via'sını görsün.
+        while packet.headers.iter().filter(|h| h.name == HeaderName::Via).count() > 1 {
+            if let Some(top_via) = packet.get_header_value(HeaderName::Via) {
+                // Eğer üstteki Via bizim iç ağımıza aitse sil
+                if top_via.contains("proxy-service") || 
+                   top_via.contains("b2bua-service") || 
+                   top_via.contains(&self.config.sip_internal_ip) {
+                    SipRouter::strip_top_via(packet);
+                } else {
+                    break;
+                }
+            } else {
+                break;
+            }
+        }
+
+        // 2. DAHİLİ BAŞLIKLARI TEMİZLE (Record-Route ve Route sızıntılarını kes)
         packet.headers.retain(|h| {
-            h.name != HeaderName::Contact && 
-            h.name != HeaderName::Server &&
-            h.name != HeaderName::UserAgent
+            match h.name {
+                HeaderName::RecordRoute | HeaderName::Route => {
+                    // Sadece bizim Public IP'miz olan Record-Route kalsın, gerisi sızıntıdır.
+                    h.value.contains(public_ip)
+                },
+                HeaderName::Contact | HeaderName::Server | HeaderName::UserAgent => {
+                    // Bunları aşağıda biz yeniden ekleyeceğiz.
+                    false
+                },
+                _ => true
+            }
         });
 
-        let public_ip = &self.config.sip_public_ip;
-        let public_port = self.config.sip_advertised_port; 
-
-        // 1. Sadece SBC üzerinden görünecek tek bir Contact ekle.
+        // 3. KİMLİK MASKESİ (Contact Header Rewrite)
         let clean_contact = format!("<sip:b2bua@{}:{}>", public_ip, public_port);
         packet.headers.push(Header::new(HeaderName::Contact, clean_contact));
-        
-        // 2. Kimlik Gizleme
         packet.headers.push(Header::new(HeaderName::Server, "Sentiric-SBC".to_string()));
-        
-        debug!("🛡️ [TOPOLOGY-HIDING] Yanıt maskelendi: {}", public_ip);
+
+        debug!("🛡️ [NUCLEAR-SANITY] Topoloji gizlendi (IP: {})", public_ip);
     }
 
     fn fix_request_uri_for_internal(&self, packet: &mut SipPacket) {
