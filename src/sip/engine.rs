@@ -61,26 +61,24 @@ impl SbcEngine {
     }
 
     fn sanitize_headers(&self, packet: &mut SipPacket) {
-        // İstemciyi (Baresip) şaşırtacak tüm başlıkları temizle
+        // [NUCLEAR OPTION]: Tüm kritik başlıkları önce temizle.
         packet.headers.retain(|h| {
             h.name != HeaderName::Contact && 
-            h.name != HeaderName::RecordRoute && 
-            h.name != HeaderName::Route
+            h.name != HeaderName::Server &&
+            h.name != HeaderName::UserAgent
         });
 
         let public_ip = &self.config.sip_public_ip;
         let public_port = self.config.sip_advertised_port; 
 
-        // 1. Yeni ve Tek Contact ekle
+        // 1. Sadece SBC üzerinden görünecek tek bir Contact ekle.
         let clean_contact = format!("<sip:b2bua@{}:{}>", public_ip, public_port);
         packet.headers.push(Header::new(HeaderName::Contact, clean_contact));
         
-        // 2. Record-Route ekle (İstemci sonraki paketleri buraya göndersin diye)
-        // SADECE INVITE ve 200 OK yanıtlarında olması yeterlidir.
-        let rr_value = format!("<sip:{}:{};lr>", public_ip, public_port);
-        packet.headers.insert(0, Header::new(HeaderName::RecordRoute, rr_value));
-
-        debug!("🛡️ [SANITY] Başlıklar temizlendi ve dış IP ({}) kilitlendi.", public_ip);
+        // 2. Kimlik Gizleme
+        packet.headers.push(Header::new(HeaderName::Server, "Sentiric-SBC".to_string()));
+        
+        debug!("🛡️ [TOPOLOGY-HIDING] Yanıt maskelendi: {}", public_ip);
     }
 
     fn fix_request_uri_for_internal(&self, packet: &mut SipPacket) {
