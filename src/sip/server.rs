@@ -79,27 +79,39 @@ impl SipServer {
     async fn route_packet(&self, packet: &mut SipPacket) {
         let target_addr = if packet.is_request {
             // İSTEK YÖNLENDİRME (Dışarıdan -> İçeriye)
-            // Artık gRPC yok, pakete kendi Via başlığımızı ekleyip doğrudan proxy'ye gönderiyoruz.
             SipRouter::add_via(packet, &self.config.sip_internal_ip, self.config.sip_port, "UDP");
             Some(self.proxy_target_addr)
         } else { 
-            // YANIT YÖNLENDİRME (İçeriden -> Dışarıya)
-            // Kendi Via başlığımızı (izimizi) siliyoruz.
-            // Yanıtın en üstünde istemcinin (Baresip) kendi Via'sı kalmalı.
+            // [KRİTİK]: YANIT YÖNLENDİRME (İçeriden -> Dışarıya)
+            
+            // 1. Kendi Via başlığımızı siliyoruz.
             SipRouter::strip_top_via(packet);
             
+            // 2. [NÜKLEER TEMİZLİK]: İstemcinin IP'sine ulaşana kadar tüm iç Via'ları temizle.
+            // Proxy ve B2BUA'dan gelen ek Via'lar Baresip'i bozar.
+            while let Some(top_via) = packet.get_header_value(HeaderName::Via) {
+                // Eğer Via başlığı bizim iç ağımızdan veya Docker servis isimlerinden geliyorsa sil.
+                if top_via.contains("proxy-service") || 
+                   top_via.contains("b2bua-service") || 
+                   top_via.contains(&self.config.sip_internal_ip) {
+                    SipRouter::strip_top_via(packet);
+                } else {
+                    // İstemcinin kendi Via'sına ulaştık, dur.
+                    break;
+                }
+            }
+
+            // 3. İstemciye gidecek hedefi en üstte kalan (İstemcinin orijinal) Via'sından çöz.
             packet.get_header_value(HeaderName::Via)
                   .and_then(|v| SipRouter::resolve_response_target(v, DEFAULT_SIP_PORT))
         };
 
         if let Some(target) = target_addr {
             let packet_bytes = packet.to_bytes();
-            debug!("📤 [SBC-ROUTE] SIP Packet Forwarding: {} -> {}", packet.method, target);
+            debug!("📤 [SBC-TEMİZ-ROTA] {} -> {}", packet.method, target);
             if let Err(e) = self.transport.send(&packet_bytes, target).await {
                 error!("🔥 SIP paketi gönderilemedi {}: {}", target, e);
             }
-        } else {
-            warn!("⚠️ Rota bulunamadı, paket atlandı. Method: {}", packet.method);
         }
     }
 

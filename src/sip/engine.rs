@@ -42,14 +42,13 @@ impl SbcEngine {
             self.fix_request_uri_for_internal(&mut packet);
         }
 
-        // 1. Önce Medya/SDP işlemleri
+        // 1. Medya/SDP işlemleri
         if !self.media.process_sdp(&mut packet).await {
             return SipAction::Drop;
         }
 
-        // 2. [KRİTİK]: Tüm Sinyalleşme İzlerini Sil (Topoloji Gizleme)
-        // İster istek (Request) ister yanıt (Response) olsun, dışarı giden her şey temizlenmeli.
-        if packet.is_response() || (packet.is_request() && src_addr.ip().to_string() != self.config.sip_public_ip) {
+        // 2. [KRİTİK]: DIŞARI GİDEN TÜM YANITLARDA TOPOLOJİ GİZLE
+        if packet.is_response() {
             self.sanitize_headers(&mut packet);
         }
 
