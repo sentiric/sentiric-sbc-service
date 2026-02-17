@@ -70,23 +70,29 @@ impl SipServer {
         }
     }
 
-    // [TEMİZLENDİ]: _src_addr kullanılarak uyarı giderildi
     async fn route_packet(&self, packet: &mut SipPacket, _src_addr: SocketAddr) {
         let target_addr = if packet.is_request() {
             // İSTEK YÖNLENDİRME (Dış -> İç)
-            SipRouter::add_via(packet, &self.config.sip_internal_ip, self.config.sip_port, "UDP");
-            Some(self.proxy_target_addr)
+            tokio::net::lookup_host(&self.config.proxy_sip_addr).await.ok().and_then(|mut i| i.next())
         } else { 
             // YANIT YÖNLENDİRME (İç -> Dış)
-            // Engine tarafında Via yığını temizlendi, en üstte kalan istemci Via'sını kullan.
+            // Engine tarafında sadece istemcinin Via'sı ve bizim eklediğimiz en üstteki Via kaldı.
+            // Şimdi kendi Via'mızı (izimizi) siliyoruz ki Baresip sadece kendi Via'sını görsün.
+            SipRouter::strip_top_via(packet);
+            
             packet.get_header_value(HeaderName::Via)
                   .and_then(|v| SipRouter::resolve_response_target(v, DEFAULT_SIP_PORT))
         };
 
         if let Some(target) = target_addr {
             let packet_bytes = packet.to_bytes();
-            info!("📤 [SBC-EGRESS] {} -> {}", packet.method, target);
-            let _ = self.transport.send(&packet_bytes, target).await;
+            // [LOG]: Paket yapısını kontrol etmek için ilk 50 karakteri basıyoruz.
+            let debug_line = String::from_utf8_lossy(&packet_bytes[..packet_bytes.len().min(50)]);
+            info!("📤 [SBC-EGRESS] Hedef: {} | Başlangıç: {}", target, debug_line);
+
+            if let Err(e) = self.transport.send(&packet_bytes, target).await {
+                error!("🔥 SIP gönderim hatası {}: {}", target, e);
+            }
         }
     }
 }
