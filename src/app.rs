@@ -43,6 +43,7 @@ impl App {
         // [GÜNCELLENDİ] Log Format Mantığı
         if config.log_format == "json" {
             // JSON (OTEL Uyumlu): Timestamp, Level, Fields otomatik formatlanır.
+            // flatten_event(true) ile iç içe JSON yerine düz bir yapı sağlarız.
             subscriber.with(fmt::layer().json().flatten_event(true)).init();
         } else {
             // Text (Dev Dostu): Renkli ve kısa.
