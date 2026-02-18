@@ -10,25 +10,20 @@ pub struct AppConfig {
     
     pub sip_bind_ip: String,
     pub sip_port: u16,
-    
-    // Dış dünyaya ilan edilecek port
     pub sip_advertised_port: u16, 
     
-    pub sip_public_ip: String, // Public IP
-    pub sip_internal_ip: String, // Internal/Tailscale IP
+    pub sip_public_ip: String,
+    pub sip_internal_ip: String,
     
-    // [DEĞİŞTİ] gRPC yerine SIP/UDP hedefi
     pub proxy_sip_addr: String, 
-    
-    // [YENİ] B2BUA Hedef Limanı (Hardcode önleme)
     pub b2bua_internal_port: u16,
     
-    // RTP Relay Settings
     pub rtp_start_port: u16,
     pub rtp_end_port: u16,
     
     pub env: String,
     pub rust_log: String,
+    pub log_format: String, // [YENİ] Log formatı (json/text)
     pub service_version: String,
     
     pub cert_path: String,
@@ -52,7 +47,6 @@ impl AppConfig {
         let grpc_addr: SocketAddr = format!("[::]:{}", grpc_port).parse()?;
         let http_addr: SocketAddr = format!("[::]:{}", http_port).parse()?;
         
-        // [DEĞİŞTİ] gRPC yerine SIP/UDP hedefi okunuyor.
         let proxy_target = env::var("PROXY_SERVICE_SIP_TARGET")
             .context("ZORUNLU: PROXY_SERVICE_SIP_TARGET eksik")?;
 
@@ -88,6 +82,7 @@ impl AppConfig {
 
             env: env::var("ENV").unwrap_or_else(|_| "production".to_string()),
             rust_log: env::var("RUST_LOG").unwrap_or_else(|_| "info".to_string()),
+            log_format: env::var("LOG_FORMAT").unwrap_or_else(|_| "text".to_string()), // [YENİ]
             service_version: env::var("SERVICE_VERSION").unwrap_or_else(|_| "1.0.0".to_string()),
             
             cert_path: env::var("SBC_SERVICE_CERT_PATH").context("ZORUNLU: SBC_SERVICE_CERT_PATH")?,

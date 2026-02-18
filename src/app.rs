@@ -40,9 +40,12 @@ impl App {
         let env_filter = EnvFilter::try_from_default_env().or_else(|_| EnvFilter::try_new(&rust_log_env))?;
         let subscriber = Registry::default().with(env_filter);
         
-        if config.env == "production" {
-            subscriber.with(fmt::layer().json()).init();
+        // [GÜNCELLENDİ] Log Format Mantığı
+        if config.log_format == "json" {
+            // JSON (OTEL Uyumlu): Timestamp, Level, Fields otomatik formatlanır.
+            subscriber.with(fmt::layer().json().flatten_event(true)).init();
         } else {
+            // Text (Dev Dostu): Renkli ve kısa.
             subscriber.with(fmt::layer().compact()).init();
         }
 
@@ -50,6 +53,7 @@ impl App {
             service_name = "sentiric-sbc-service",
             version = %config.service_version,
             profile = %config.env,
+            log_format = %config.log_format,
             "🚀 Servis başlatılıyor..."
         );
         
@@ -63,7 +67,6 @@ impl App {
 
         // --- SIP Sunucusunu Başlat ---
         let sip_config = self.config.clone();
-        // [GÜNCELLENDİ] Sadece config alıyor, gRPC client bağımlılığı yok.
         let sip_server = SipServer::new(sip_config).await?;
         let sip_handle = tokio::spawn(async move {
             sip_server.run(sip_shutdown_rx).await;
