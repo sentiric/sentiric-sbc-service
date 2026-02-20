@@ -16,7 +16,6 @@ pub struct SipServer {
     config: Arc<AppConfig>,
     transport: Arc<SipTransport>,
     engine: SbcEngine,
-    // [FIX]: Alan adı uyarıyı engellemek için '_' ile başlar.
     _proxy_target_addr: SocketAddr, 
 }
 
@@ -31,19 +30,27 @@ impl SipServer {
             .next()
             .context("Proxy SIP hedefi çözümlenemedi")?;
         
-        info!("🎯 Dahili SIP hedefi kilitlendi: {}", proxy_target_addr);
+        info!(
+            event = "SIP_INTERNAL_ROUTE_LOCKED",
+            target = %proxy_target_addr,
+            "🎯 Dahili SIP hedefi kilitlendi"
+        );
 
         Ok(Self {
             config: config.clone(),
             transport: Arc::new(transport),
             engine: SbcEngine::new(config, rtp_engine),
-            // [FIX]: Değişken adı struct alanı ile eşleşmeli.
             _proxy_target_addr: proxy_target_addr,
         })
     }
     
     pub async fn run(self, mut shutdown_rx: mpsc::Receiver<()>) {
-        info!("📡 SBC Aktif (Strict Topology Hiding): {}:{}", self.config.sip_bind_ip, self.config.sip_port);
+        info!(
+            event = "SIP_SERVER_ACTIVE",
+            bind_ip = %self.config.sip_bind_ip,
+            port = self.config.sip_port,
+            "📡 SBC Aktif (Strict Topology Hiding)"
+        );
         let mut buf = vec![0u8; 65535];
         let socket = self.transport.get_socket();
 
@@ -63,10 +70,15 @@ impl SipServer {
                                         self.route_packet(&mut processed, src_addr).await;
                                     }
                                 },
-                                Err(e) => warn!("⚠️ Bozuk paket: {}", e),
+                                Err(e) => warn!(
+                                    event = "SIP_PARSE_ERROR",
+                                    source_ip = %src_addr,
+                                    error = %e,
+                                    "⚠️ Bozuk paket"
+                                ),
                             }
                         },
-                        Err(e) => error!("🔥 Socket hatası: {}", e),
+                        Err(e) => error!(event="SIP_SOCKET_ERROR", error=%e, "🔥 Socket hatası"),
                     }
                 }
             }
@@ -85,10 +97,24 @@ impl SipServer {
         if let Some(target) = target_addr {
             let packet_bytes = packet.to_bytes();
             let debug_line = String::from_utf8_lossy(&packet_bytes[..packet_bytes.len().min(50)]);
-            info!("📤 [SBC-EGRESS] Hedef: {} | Başlangıç: {}", target, debug_line);
+            let call_id = packet.get_header_value(HeaderName::CallId).cloned().unwrap_or_default();
+            
+            info!(
+                event = "SIP_EGRESS",
+                sip.call_id = %call_id,
+                target_ip = %target,
+                packet.start = %debug_line.trim_end(),
+                "📤 [SBC-EGRESS] Paket yönlendiriliyor"
+            );
 
             if let Err(e) = self.transport.send(&packet_bytes, target).await {
-                error!("🔥 SIP gönderim hatası {}: {}", target, e);
+                error!(
+                    event = "SIP_SEND_ERROR",
+                    sip.call_id = %call_id,
+                    target_ip = %target,
+                    error = %e,
+                    "🔥 SIP gönderim hatası"
+                );
             }
         }
     }

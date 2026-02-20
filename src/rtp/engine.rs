@@ -5,7 +5,7 @@ use tokio::net::UdpSocket;
 use dashmap::DashMap;
 use std::net::{SocketAddr, IpAddr};
 use std::time::Duration;
-use tracing::{info, error};
+use tracing::{info, error, warn};
 use rand::Rng;
 
 fn is_internal_ip(ip: IpAddr) -> bool {
@@ -72,9 +72,20 @@ impl RtpEngine {
                 let stop_rx = tx.subscribe();
 
                 tokio::spawn(async move {
-                    info!("🚀 [RTP-RELAY] Başlatıldı: Port {} | CallID: {}", port, call_id_owned);
-                    if let Err(e) = run_relay_loop(port, stop_rx, initial_peer).await {
-                        error!("🔥 [RTP-RELAY] Hata (Port {}): {}", port, e);
+                    info!(
+                        event = "RTP_RELAY_STARTED",
+                        sip.call_id = %call_id_owned,
+                        rtp.port = port,
+                        "🚀 [RTP-RELAY] Başlatıldı"
+                    );
+                    if let Err(e) = run_relay_loop(port, stop_rx, initial_peer, &call_id_owned).await {
+                        error!(
+                            event = "RTP_RELAY_ERROR",
+                            sip.call_id = %call_id_owned,
+                            rtp.port = port,
+                            error = %e,
+                            "🔥 [RTP-RELAY] Hata"
+                        );
                     }
                     active_relays_clone.remove(&port);
                     call_id_map_clone.remove(&call_id_owned);
@@ -85,6 +96,7 @@ impl RtpEngine {
                 return Some(port);
             }
         }
+        warn!(event="RTP_PORT_EXHAUSTED", sip.call_id=%call_id, "Port aralığı tükendi, relay ayrılamıyor.");
         None
     }
 
@@ -92,6 +104,7 @@ impl RtpEngine {
         if let Some((_, port)) = self.call_id_map.remove(call_id) {
             if let Some((_, relay)) = self.active_relays.remove(&port) {
                 let _ = relay.stop_signal.send(());
+                info!(event="RTP_RELAY_RELEASED", sip.call_id=%call_id, rtp.port=port, "RTP Relay serbest bırakıldı.");
                 return true;
             }
         }
@@ -99,7 +112,7 @@ impl RtpEngine {
     }
 }
 
-async fn run_relay_loop(port: u16, mut stop_signal: tokio::sync::broadcast::Receiver<()>, initial_external_peer: Option<SocketAddr>) -> anyhow::Result<()> {
+async fn run_relay_loop(port: u16, mut stop_signal: tokio::sync::broadcast::Receiver<()>, initial_external_peer: Option<SocketAddr>, call_id: &str) -> anyhow::Result<()> {
     let addr = format!("0.0.0.0:{}", port);
     let socket = UdpSocket::bind(&addr).await?;
     let mut buf = [0u8; 2048];
@@ -117,21 +130,24 @@ async fn run_relay_loop(port: u16, mut stop_signal: tokio::sync::broadcast::Rece
                         if is_internal {
                             if peer_internal != Some(src) {
                                 if !(is_docker_gateway(src.ip()) && peer_internal.is_some()) {
-                                    info!("🏢 [LATCH-INT] İç Bacak Kilitlendi: {}", src);
+                                    info!(event="RTP_LATCH_INTERNAL", sip.call_id=%call_id, rtp.port=port, peer.ip=%src, "🏢 [LATCH-INT] İç Bacak Kilitlendi");
                                     peer_internal = Some(src);
                                 }
                             }
                             if let Some(dst) = peer_external { let _ = socket.send_to(&buf[..len], dst).await; }
                         } else {
                             if peer_external != Some(src) {
-                                info!("🌍 [LATCH-EXT] Dış Bacak Kilitlendi: {}", src);
+                                info!(event="RTP_LATCH_EXTERNAL", sip.call_id=%call_id, rtp.port=port, peer.ip=%src, "🌍 [LATCH-EXT] Dış Bacak Kilitlendi");
                                 peer_external = Some(src);
                             }
                             if let Some(dst) = peer_internal { let _ = socket.send_to(&buf[..len], dst).await; }
                         }
                     }
                     Ok(Err(_)) => break,
-                    Err(_) => break,
+                    Err(_) => {
+                        warn!(event="RTP_RELAY_TIMEOUT", sip.call_id=%call_id, rtp.port=port, "RTP Relay zaman aşımına uğradı.");
+                        break;
+                    },
                 }
             }
         }
