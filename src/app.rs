@@ -45,16 +45,21 @@ impl App {
         let subscriber = Registry::default().with(env_filter);
 
         if config.log_format == "json" {
-            // SUTS v4.0 Uyumlu Formatter Kullan
+            // ================== KRİTİK MİMARİ DÜZELTME ==================
+            // Telemetry formatter artık mantıksal servis adını ve
+            // fiziksel sunucu adını kullanır.
             let suts_formatter = SutsFormatter::new(
-                "sentiric-sbc-service".to_string(),
+                "sbc-service".to_string(), // STANDART: Kısa, mantıksal servis adı
                 config.service_version.clone(),
                 config.env.clone(),
+                config.node_hostname.clone(), // STANDART: Fiziksel sunucu adı
             );
+            // ==========================================================
             
             subscriber
                 .with(fmt::layer().event_format(suts_formatter))
                 .init();
+   
         } else {
             // Development/Text Modu
             subscriber.with(fmt::layer().compact()).init();

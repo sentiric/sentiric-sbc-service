@@ -1,3 +1,4 @@
+// sentiric-sbc-service/src/telemetry.rs
 use chrono::Utc;
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -34,7 +35,7 @@ struct ResourceContext {
     #[serde(rename = "service.env")]
     service_env: String,
     #[serde(rename = "host.name")]
-    host_name: String,
+    host_name: String, // Artık zorunlu ve dolu olacak
 }
 
 pub struct SutsFormatter {
@@ -42,11 +43,8 @@ pub struct SutsFormatter {
 }
 
 impl SutsFormatter {
-    pub fn new(service_name: String, version: String, env: String) -> Self {
-        let host_name = hostname::get()
-            .map(|h| h.to_string_lossy().into_owned())
-            .unwrap_or_else(|_| "unknown".to_string());
-
+    // Yapıcı fonksiyon artık host_name'i dışarıdan alıyor.
+    pub fn new(service_name: String, version: String, env: String, host_name: String) -> Self {
         Self {
             resource: ResourceContext {
                 service_name,
@@ -57,6 +55,7 @@ impl SutsFormatter {
         }
     }
 }
+
 
 impl<S, N> FormatEvent<S, N> for SutsFormatter
 where
@@ -106,7 +105,7 @@ where
             schema_v: "1.0.0",
             ts,
             severity,
-            tenant_id: "default".to_string(),
+            tenant_id: "sentiric_demo".to_string(),
             resource: self.resource.clone(),
             trace_id,
             span_id: None,

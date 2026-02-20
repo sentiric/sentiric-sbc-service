@@ -5,7 +5,7 @@ use std::net::SocketAddr;
 
 #[derive(Debug, Clone)]
 pub struct AppConfig {
-    pub grpc_listen_addr: SocketAddr,
+   pub grpc_listen_addr: SocketAddr,
     pub http_listen_addr: SocketAddr,
     
     pub sip_bind_ip: String,
@@ -20,12 +20,14 @@ pub struct AppConfig {
     
     pub rtp_start_port: u16,
     pub rtp_end_port: u16,
-    
+
+    pub node_hostname: String, // YENİ: Fiziksel sunucu adı
+
     pub env: String,
     pub rust_log: String,
     pub log_format: String, // [YENİ] Log formatı (json/text)
     pub service_version: String,
-    
+
     pub cert_path: String,
     pub key_path: String,
     pub ca_path: String,
@@ -63,7 +65,8 @@ impl AppConfig {
         let rtp_start = env::var("SBC_RTP_START_PORT").unwrap_or_else(|_| "30000".to_string()).parse()?;
         let rtp_end = env::var("SBC_RTP_END_PORT").unwrap_or_else(|_| "30100".to_string()).parse()?;
 
-        Ok(AppConfig {
+
+       Ok(AppConfig {
             grpc_listen_addr: grpc_addr,
             http_listen_addr: http_addr, 
             
@@ -80,6 +83,8 @@ impl AppConfig {
             rtp_start_port: rtp_start,
             rtp_end_port: rtp_end,
 
+            node_hostname: env::var("NODE_HOSTNAME").unwrap_or_else(|_| "localhost".to_string()), // YENİ
+            
             env: env::var("ENV").unwrap_or_else(|_| "production".to_string()),
             rust_log: env::var("RUST_LOG").unwrap_or_else(|_| "info".to_string()),
             log_format: env::var("LOG_FORMAT").unwrap_or_else(|_| "text".to_string()), // [YENİ]
