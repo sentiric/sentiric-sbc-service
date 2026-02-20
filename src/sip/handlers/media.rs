@@ -48,7 +48,11 @@ impl MediaHandler {
         if extracted_port > 0 && extracted_ip != "0.0.0.0" {
              client_rtp_addr = format!("{}:{}", extracted_ip, extracted_port).parse().ok();
         } else if extracted_ip == "0.0.0.0" {
-            warn!("⚠️ [SDP-AUDIT] 0.0.0.0 detected from client {}. Symmetric RTP Latching enabled.", call_id);
+            warn!(
+                event="SDP_ZERO_IP_DETECTED",
+                sip.call_id=%call_id,
+                "⚠️ [SDP-AUDIT] 0.0.0.0 IP adresi tespit edildi, simetrik RTP latching devrede."
+            );
         }
 
         let relay_port = match self.rtp_engine.get_or_allocate_relay(&call_id, client_rtp_addr).await {
@@ -61,8 +65,7 @@ impl MediaHandler {
         } else {
             &self.config.sip_public_ip
         };
-
-        // [GÜNCELLEME]: Sip-Core'un yeni robust manipülatörünü çağırıyoruz.
+        
         if let Some(new_body) = SdpManipulator::rewrite_connection_info(&packet.body, advertise_ip, relay_port) {
             let body_str = String::from_utf8_lossy(&new_body);
             let clean_body = self.rtcp_regex.replace_all(&body_str, "").to_string();
@@ -71,9 +74,21 @@ impl MediaHandler {
             packet.headers.retain(|h| h.name != HeaderName::ContentLength);
             packet.headers.push(Header::new(HeaderName::ContentLength, packet.body.len().to_string()));
             
-            info!(call_id, port = relay_port, "🛡️ [SDP-FIXED] Nuclear Rewrite Success on {}.", advertise_ip);
+            // ================== LOG İYİLEŞTİRME ==================
+            info!(
+                event = "SDP_REWRITE_SUCCESS",
+                sip.call_id = %call_id,
+                rtp.port = relay_port,
+                advertise.ip = %advertise_ip,
+                "🛡️ [SDP-FIXED] SDP bağlantı bilgisi yeniden yazıldı."
+            );
+            // =======================================================
         } else {
-            warn!(call_id, "🚨 [SDP-FIX-FAILED] Could not find audio lines to rewrite!");
+            warn!(
+                event="SDP_REWRITE_FAILED",
+                sip.call_id=%call_id,
+                "🚨 [SDP-FIX-FAILED] Yeniden yazılacak ses (audio) satırı bulunamadı!"
+            );
         }
 
         true
