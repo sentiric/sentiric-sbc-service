@@ -3,6 +3,7 @@ use crate::config::AppConfig;
 use crate::grpc::service::MySbcService;
 use crate::sip::server::SipServer;
 use crate::tls::load_server_tls_config;
+use crate::telemetry::SutsFormatter; // YENİ
 use anyhow::{Context, Result};
 use sentiric_contracts::sentiric::sip::v1::sbc_service_server::SbcServiceServer;
 use std::convert::Infallible;
@@ -34,28 +35,39 @@ impl App {
         dotenvy::dotenv().ok();
         let config = Arc::new(AppConfig::load_from_env().context("Konfigürasyon dosyası yüklenemedi")?);
 
+        // --- GÜNCELLENMİŞ LOGLAMA BAŞLANGICI ---
         let rust_log_env = env::var("RUST_LOG")
             .unwrap_or_else(|_| config.rust_log.clone());
         
-        let env_filter = EnvFilter::try_from_default_env().or_else(|_| EnvFilter::try_new(&rust_log_env))?;
+        let env_filter = EnvFilter::try_from_default_env()
+            .or_else(|_| EnvFilter::try_new(&rust_log_env))?;
+
         let subscriber = Registry::default().with(env_filter);
-        
-        // [GÜNCELLENDİ] Log Format Mantığı
+
         if config.log_format == "json" {
-            // JSON (OTEL Uyumlu): Timestamp, Level, Fields otomatik formatlanır.
-            // flatten_event(true) ile iç içe JSON yerine düz bir yapı sağlarız.
-            subscriber.with(fmt::layer().json().flatten_event(true)).init();
+            // SUTS v4.0 Uyumlu Formatter Kullan
+            let suts_formatter = SutsFormatter::new(
+                "sentiric-sbc-service".to_string(),
+                config.service_version.clone(),
+                config.env.clone(),
+            );
+            
+            subscriber
+                .with(fmt::layer().event_format(suts_formatter))
+                .init();
         } else {
-            // Text (Dev Dostu): Renkli ve kısa.
+            // Development/Text Modu
             subscriber.with(fmt::layer().compact()).init();
         }
+        // --- GÜNCELLENMİŞ LOGLAMA BİTİŞİ ---
 
+        // İlk SUTS uyumlu log örneği
         info!(
+            event = "SYSTEM_STARTUP",
             service_name = "sentiric-sbc-service",
             version = %config.service_version,
             profile = %config.env,
-            log_format = %config.log_format,
-            "🚀 Servis başlatılıyor..."
+            "🚀 Servis başlatılıyor (SUTS v4.0 Active)..."
         );
         
         Ok(Self { config })
@@ -79,14 +91,18 @@ impl App {
             let tls_config = load_server_tls_config(&grpc_config).await.expect("TLS yapılandırması başarısız");
             let grpc_service = MySbcService {};
             
-            info!(address = %grpc_config.grpc_listen_addr, "Güvenli gRPC sunucusu dinlemeye başlıyor...");
+            info!(
+                event = "GRPC_SERVER_START",
+                address = %grpc_config.grpc_listen_addr, 
+                "Güvenli gRPC sunucusu dinlemeye başlıyor..."
+            );
             
             GrpcServer::builder()
                 .tls_config(tls_config).expect("TLS yapılandırma hatası")
                 .add_service(SbcServiceServer::new(grpc_service))
                 .serve_with_shutdown(grpc_config.grpc_listen_addr, async {
                     shutdown_rx.recv().await;
-                    info!("gRPC sunucusu için kapatma sinyali alındı.");
+                    info!(event = "GRPC_SHUTDOWN_SIGNAL", "gRPC sunucusu için kapatma sinyali alındı.");
                 })
                 .await
                 .context("gRPC sunucusu hatayla sonlandı")
@@ -106,9 +122,18 @@ impl App {
                     http_shutdown_rx.await.ok();
                 });
             
-            info!(address = %addr, "HTTP sağlık kontrol sunucusu dinlemeye başlıyor...");
+            info!(
+                event = "HTTP_SERVER_START",
+                address = %addr, 
+                "HTTP sağlık kontrol sunucusu dinlemeye başlıyor..."
+            );
+            
             if let Err(e) = server.await {
-                error!(error = %e, "HTTP sunucusu hatayla sonlandı");
+                error!(
+                    event = "HTTP_SERVER_ERROR",
+                    error = %e, 
+                    "HTTP sunucusu hatayla sonlandı"
+                );
             }
         });
 
@@ -118,19 +143,19 @@ impl App {
             res = grpc_server_handle => {
                 let inner_res = res.context("gRPC sunucu görevi panic'ledi")?;
                 if let Err(e) = inner_res { return Err(e); }
-                error!("gRPC sunucusu beklenmedik şekilde sonlandı!");
+                error!(event = "UNEXPECTED_SHUTDOWN", "gRPC sunucusu beklenmedik şekilde sonlandı!");
             },
             _res = http_server_handle => { },
             _res = sip_handle => { },
             _ = ctrl_c => {},
         }
 
-        warn!("Kapatma sinyali alındı. Graceful shutdown başlatılıyor...");
+        warn!(event = "SYSTEM_SHUTDOWN", "Kapatma sinyali alındı. Graceful shutdown başlatılıyor...");
         let _ = shutdown_tx.send(()).await;
         let _ = sip_shutdown_tx.send(()).await;
         let _ = http_shutdown_tx.send(());
         
-        info!("Servis başarıyla durduruldu.");
+        info!(event = "SYSTEM_STOPPED", "Servis başarıyla durduruldu.");
         Ok(())
     }
 }
