@@ -7,7 +7,7 @@ use crate::rtp::engine::RtpEngine;
 use crate::sip::handlers::security::SecurityHandler;
 use crate::sip::handlers::packet::PacketHandler;
 use crate::sip::handlers::media::MediaHandler;
-use tracing::{debug, info, warn};
+use tracing::{debug, warn}; // 'info' kaldırıldı
 
 pub enum SipAction {
     Forward(SipPacket),
@@ -46,7 +46,7 @@ impl SbcEngine {
         if !self.security.check_access(src_addr.ip()) { 
             warn!(
                 event = "SIP_ACCESS_DENIED",
-                net.peer.ip = %src_addr.ip(),
+                net.src.ip = %src_addr.ip(),
                 "Erişim reddedildi"
             );
             return SipAction::Drop; 
@@ -58,7 +58,7 @@ impl SbcEngine {
                 warn!(event = "SIP_SANITIZATION_FAILED", trace_id = %call_id, "Paket temizliği başarısız");
                 return SipAction::Drop; 
             }
-            // ... (Diğer logic aynı)
+            // Logic aynı
             self.fix_request_uri_for_internal(&mut packet);
             
             // Medya işleme (SDP varsa Port Ayır)
@@ -88,9 +88,8 @@ impl SbcEngine {
         SipAction::Forward(packet)
     }
 
-    // ... (Diğer yardımcı fonksiyonlar aynı kalacak)
-    // Sadece log satırlarını gerekirse macroya çevirdim.
-    
+    // --- HELPER METHODS (TAM İÇERİK) ---
+
     fn apply_strict_topology_hiding(&self, packet: &mut SipPacket) {
         let public_ip = &self.config.sip_public_ip;
         let public_port = self.config.sip_advertised_port;
@@ -120,7 +119,14 @@ impl SbcEngine {
         packet.headers.retain(|h| h.name != HeaderName::Server && h.name != HeaderName::UserAgent);
         packet.headers.push(Header::new(HeaderName::Server, "Sentiric-SBC".to_string()));
 
-        debug!("🛡️ [HARDENING] Yanıt başarıyla maskelendi: {}", public_ip);
+        // Loglama
+        let call_id = packet.get_header_value(HeaderName::CallId).cloned().unwrap_or_default();
+        debug!(
+            event = "SIP_TOPOLOGY_HIDDEN",
+            trace_id = %call_id,
+            advertise.ip = %public_ip,
+            "🛡️ [HARDENING] Yanıt maskelendi"
+        );
     }
 
     fn fix_request_uri_for_internal(&self, packet: &mut SipPacket) {

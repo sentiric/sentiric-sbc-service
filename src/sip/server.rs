@@ -6,7 +6,7 @@ use sentiric_sip_core::{parser, SipTransport, SipPacket, HeaderName, SipRouter, 
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::mpsc;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn}; // debug eklendi
 
 pub const DEFAULT_SIP_PORT: u16 = 5060;
 
@@ -28,7 +28,6 @@ impl SipServer {
             .next()
             .context("Proxy SIP hedefi çözümlenemedi")?;
         
-        // Config Log (Startup)
         info!(
             event = "SIP_CONFIG_LOADED",
             proxy.target = %proxy_target_addr,
@@ -69,9 +68,24 @@ impl SipServer {
                                         let _ = self.transport.send(&SipResponseFactory::create_100_trying(&packet).to_bytes(), src_addr).await;
                                     }
                                     
-                                    // LOG INGRESS
+                                    // --- DÜZELTME BAŞLANGICI ---
+                                    // Değişkenleri tanımladık ve şimdi LOG içinde kullanıyoruz.
                                     let call_id = packet.get_header_value(HeaderName::CallId).cloned().unwrap_or_default();
                                     let method = packet.method.as_str();
+
+                                    // INGRESS LOG (Gelen Paket)
+                                    // Bunu DEBUG seviyesinde tutuyoruz ki INFO akışı çok şişmesin,
+                                    // ama 'trace_id' sayesinde Observer'da filtrelenebilir olsun.
+                                    debug!(
+                                        event = "SIP_PACKET_RECEIVED",
+                                        trace_id = %call_id,
+                                        sip.call_id = %call_id,
+                                        sip.method = %method,
+                                        net.src.ip = %src_addr.ip(),
+                                        net.src.port = src_addr.port(),
+                                        "📥 SIP paketi alındı"
+                                    );
+                                    // --- DÜZELTME BİTİŞİ ---
                                     
                                     // Engine Inspection
                                     if let SipAction::Forward(mut processed) = self.engine.inspect(packet, src_addr).await {
@@ -110,14 +124,14 @@ impl SipServer {
 
             // LOG EGRESS (SUTS v4.0)
             info!(
-                event = "SIP_PACKET_SENT",
+                event = "SIP_EGRESS",
                 trace_id = %call_id, // Zorunlu Correlation ID
                 sip.call_id = %call_id,
                 sip.method = %method,
-                net.peer.ip = %target.ip(),
-                net.peer.port = target.port(),
+                net.dst.ip = %target.ip(),
+                net.dst.port = target.port(),
                 packet.summary = %debug_line.trim_end(),
-                "📤 [SBC->PROXY] Paket iletiliyor"
+                "📤 [SBC->NEXT] Paket yönlendiriliyor"
             );
 
             if let Err(e) = self.transport.send(&packet_bytes, target).await {
@@ -125,7 +139,7 @@ impl SipServer {
                     event = "SIP_SEND_ERROR",
                     trace_id = %call_id,
                     sip.call_id = %call_id,
-                    net.peer.ip = %target.ip(),
+                    net.dst.ip = %target.ip(),
                     error = %e,
                     "🔥 SIP paketi hedefe gönderilemedi"
                 );
