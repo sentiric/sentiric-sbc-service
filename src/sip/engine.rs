@@ -1,4 +1,4 @@
-use sentiric_sip_core::{SipPacket, HeaderName, Header, Method}; 
+use sentiric_sip_core::{SipPacket, SipRouter, HeaderName, Header, Method}; 
 use sentiric_sip_core::utils as sip_utils;
 use std::sync::Arc;
 use std::net::SocketAddr;
@@ -31,7 +31,13 @@ impl SbcEngine {
         }
     }
 
+    // --- ANA İŞLEME METODU ---
+    // Bu fonksiyon detaylıca incelenmeli
+    // lOGLAMA VE GÜVENLİK KONTROLLERİ ÖNEMLİ
     pub async fn inspect(&self, mut packet: SipPacket, src_addr: SocketAddr) -> SipAction {
+        
+        if !self.security.check_access(src_addr.ip()) { return SipAction::Drop; }
+
         let call_id = packet.get_header_value(HeaderName::CallId).cloned().unwrap_or_default();
         let method = packet.method.as_str().to_string();
 
@@ -58,7 +64,20 @@ impl SbcEngine {
                 warn!(event = "SIP_SANITIZATION_FAILED", trace_id = %call_id, "Paket temizliği başarısız");
                 return SipAction::Drop; 
             }
-            // Logic aynı
+
+            // Burası Log standartları uygulanırken kaldırılmış.
+            // Tekrar Ekledim!
+            // Neden kaldırılmıi?
+            //  Logic Mantık mı?
+            // !PacketHandler::sanitize(&packet) if bloğunun içinde idi?
+            // Bu tarz kritik logicleri kontrollerı guvence almak gerekecek?
+            // BUnu planlamalaıyız
+            SipRouter::fix_nat_via(&mut packet, src_addr);
+            
+
+            // Bu kısımda !PacketHandler::sanitize(&packet) içine idi
+            // Buraya neden alınmış?
+
             self.fix_request_uri_for_internal(&mut packet);
             
             // Medya işleme (SDP varsa Port Ayır)
