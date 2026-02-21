@@ -1,3 +1,5 @@
+// sentiric-sbc-service/src/sip/engine.rs
+
 use sentiric_sip_core::{SipPacket, SipRouter, HeaderName, Header, Method}; 
 use sentiric_sip_core::utils as sip_utils;
 use std::sync::Arc;
@@ -7,7 +9,7 @@ use crate::rtp::engine::RtpEngine;
 use crate::sip::handlers::security::SecurityHandler;
 use crate::sip::handlers::packet::PacketHandler;
 use crate::sip::handlers::media::MediaHandler;
-use tracing::{debug, warn}; // 'info' kaldırıldı
+use tracing::{debug, info, warn}; // warn eklendi
 
 pub enum SipAction {
     Forward(SipPacket),
@@ -31,24 +33,8 @@ impl SbcEngine {
         }
     }
 
-    // --- ANA İŞLEME METODU ---
-    // Bu fonksiyon detaylıca incelenmeli
-    // lOGLAMA VE GÜVENLİK KONTROLLERİ ÖNEMLİ
     pub async fn inspect(&self, mut packet: SipPacket, src_addr: SocketAddr) -> SipAction {
-        
-        if !self.security.check_access(src_addr.ip()) { return SipAction::Drop; }
-
-        let call_id = packet.get_header_value(HeaderName::CallId).cloned().unwrap_or_default();
-        let method = packet.method.as_str().to_string();
-
-        // 0. LOG INGRESS (Engine Seviyesi)
-        debug!(
-            event = "SIP_PACKET_INSPECT",
-            trace_id = %call_id,
-            sip.method = %method,
-            "Engine paket analizi yapıyor"
-        );
-
+        // Güvenlik kontrolü en başta (Orijinal koddaki gibi)
         if !self.security.check_access(src_addr.ip()) { 
             warn!(
                 event = "SIP_ACCESS_DENIED",
@@ -58,45 +44,46 @@ impl SbcEngine {
             return SipAction::Drop; 
         }
         
+        let call_id = packet.get_header_value(HeaderName::CallId).cloned().unwrap_or_default();
+
         // 1. İSTEK İŞLEME (Gelen Aramalar)
         if packet.is_request() {
             if !PacketHandler::sanitize(&packet) { 
-                warn!(event = "SIP_SANITIZATION_FAILED", trace_id = %call_id, "Paket temizliği başarısız");
+                warn!(
+                    event = "SIP_SANITIZATION_FAILED", 
+                    trace_id = %call_id, 
+                    "Paket temizliği başarısız"
+                );
                 return SipAction::Drop; 
             }
-
-            // Burası Log standartları uygulanırken kaldırılmış.
-            // Tekrar Ekledim!
-            // Neden kaldırılmıi?
-            //  Logic Mantık mı?
-            // !PacketHandler::sanitize(&packet) if bloğunun içinde idi?
-            // Bu tarz kritik logicleri kontrollerı guvence almak gerekecek?
-            // BUnu planlamalaıyız
-            SipRouter::fix_nat_via(&mut packet, src_addr);
             
-
-            // Bu kısımda !PacketHandler::sanitize(&packet) içine idi
-            // Buraya neden alınmış?
-
+            // Kritik routing mantığı orijinal yerinde
+            SipRouter::fix_nat_via(&mut packet, src_addr);
             self.fix_request_uri_for_internal(&mut packet);
             
             // Medya işleme (SDP varsa Port Ayır)
             if !self.media.process_sdp(&mut packet).await { 
-                warn!(event = "SIP_SDP_PROCESS_FAIL", trace_id = %call_id, "SDP işlenemedi, paket düşürülüyor");
+                warn!(
+                    event = "SIP_SDP_PROCESS_FAIL", 
+                    trace_id = %call_id, 
+                    "SDP işlenemedi, paket düşürülüyor"
+                );
                 return SipAction::Drop; 
             }
         } 
         
         // 2. YANIT İŞLEME (Giden 200 OK vb.)
         if packet.is_response() {
+            // [NUCLEAR FIX]: Yanıt paketinde SDP varsa, kiraladığımız portu SDP'ye ZORLA yaz.
+            // Bu, loglardaki 50030 sızıntısını engelleyen ana müdahaledir.
             if !self.media.process_sdp(&mut packet).await { 
-                // Uyarı var ama drop yok (Best effort)
                 warn!(
                     event = "SIP_RESPONSE_SDP_FAIL",
-                    trace_id = %call_id, 
+                    trace_id = %call_id,
                     "⚠️ Yanıt paketi SDP işlenemedi (Medya bacağı eksik olabilir)"
                 );
             }
+            
             self.apply_strict_topology_hiding(&mut packet);
         }
 
@@ -106,8 +93,6 @@ impl SbcEngine {
         
         SipAction::Forward(packet)
     }
-
-    // --- HELPER METHODS (TAM İÇERİK) ---
 
     fn apply_strict_topology_hiding(&self, packet: &mut SipPacket) {
         let public_ip = &self.config.sip_public_ip;
@@ -138,13 +123,12 @@ impl SbcEngine {
         packet.headers.retain(|h| h.name != HeaderName::Server && h.name != HeaderName::UserAgent);
         packet.headers.push(Header::new(HeaderName::Server, "Sentiric-SBC".to_string()));
 
-        // Loglama
         let call_id = packet.get_header_value(HeaderName::CallId).cloned().unwrap_or_default();
         debug!(
             event = "SIP_TOPOLOGY_HIDDEN",
             trace_id = %call_id,
             advertise.ip = %public_ip,
-            "🛡️ [HARDENING] Yanıt maskelendi"
+            "🛡️ [HARDENING] Yanıt başarıyla maskelendi"
         );
     }
 
