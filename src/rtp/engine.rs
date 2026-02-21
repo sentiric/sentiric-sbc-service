@@ -1,5 +1,3 @@
-// sentiric-sbc-service/src/rtp/engine.rs
-
 use std::sync::Arc;
 use tokio::net::UdpSocket;
 use dashmap::DashMap;
@@ -8,11 +6,12 @@ use std::time::Duration;
 use tracing::{info, error, warn};
 use rand::Rng;
 
+// (Yardımcı fonksiyonlar is_internal_ip ve is_docker_gateway değişmeden kalabilir)
 fn is_internal_ip(ip: IpAddr) -> bool {
     match ip {
         IpAddr::V4(ipv4) => {
             let octets = ipv4.octets();
-            if octets[0] == 10 && octets[1] == 88 && octets[3] == 1 { return true; } // Docker GW
+            if octets[0] == 10 && octets[1] == 88 && octets[3] == 1 { return true; } 
             if octets[0] == 10 || octets[0] == 127 { return true; }
             if octets[0] == 172 && (octets[1] >= 16 && octets[1] <= 31) { return true; }
             if octets[0] == 192 && octets[1] == 168 { return true; }
@@ -72,19 +71,23 @@ impl RtpEngine {
                 let stop_rx = tx.subscribe();
 
                 tokio::spawn(async move {
+                    // SUTS v4.0 LOG
                     info!(
                         event = "RTP_RELAY_STARTED",
+                        trace_id = %call_id_owned, // ZORUNLU
                         sip.call_id = %call_id_owned,
                         rtp.port = port,
                         "🚀 [RTP-RELAY] Başlatıldı"
                     );
+                    
                     if let Err(e) = run_relay_loop(port, stop_rx, initial_peer, &call_id_owned).await {
                         error!(
                             event = "RTP_RELAY_ERROR",
+                            trace_id = %call_id_owned,
                             sip.call_id = %call_id_owned,
                             rtp.port = port,
                             error = %e,
-                            "🔥 [RTP-RELAY] Hata"
+                            "🔥 [RTP-RELAY] Hata oluştu"
                         );
                     }
                     active_relays_clone.remove(&port);
@@ -96,7 +99,13 @@ impl RtpEngine {
                 return Some(port);
             }
         }
-        warn!(event="RTP_PORT_EXHAUSTED", sip.call_id=%call_id, "Port aralığı tükendi, relay ayrılamıyor.");
+        
+        warn!(
+            event = "RTP_PORT_EXHAUSTED",
+            trace_id = %call_id,
+            sip.call_id = %call_id,
+            "Port aralığı tükendi, relay ayrılamıyor."
+        );
         None
     }
 
@@ -104,7 +113,14 @@ impl RtpEngine {
         if let Some((_, port)) = self.call_id_map.remove(call_id) {
             if let Some((_, relay)) = self.active_relays.remove(&port) {
                 let _ = relay.stop_signal.send(());
-                info!(event="RTP_RELAY_RELEASED", sip.call_id=%call_id, rtp.port=port, "RTP Relay serbest bırakıldı.");
+                
+                info!(
+                    event = "RTP_RELAY_RELEASED",
+                    trace_id = %call_id,
+                    sip.call_id = %call_id,
+                    rtp.port = port,
+                    "🛑 RTP Relay serbest bırakıldı."
+                );
                 return true;
             }
         }
@@ -130,14 +146,32 @@ async fn run_relay_loop(port: u16, mut stop_signal: tokio::sync::broadcast::Rece
                         if is_internal {
                             if peer_internal != Some(src) {
                                 if !(is_docker_gateway(src.ip()) && peer_internal.is_some()) {
-                                    info!(event="RTP_LATCH_INTERNAL", sip.call_id=%call_id, rtp.port=port, peer.ip=%src, "🏢 [LATCH-INT] İç Bacak Kilitlendi");
+                                    // LOG LATCH INTERNAL
+                                    info!(
+                                        event = "RTP_LATCH_INTERNAL",
+                                        trace_id = %call_id,
+                                        sip.call_id = %call_id,
+                                        rtp.port = port,
+                                        net.peer.ip = %src.ip(),
+                                        net.peer.port = src.port(),
+                                        "🏢 [LATCH-INT] İç Bacak Kilitlendi"
+                                    );
                                     peer_internal = Some(src);
                                 }
                             }
                             if let Some(dst) = peer_external { let _ = socket.send_to(&buf[..len], dst).await; }
                         } else {
                             if peer_external != Some(src) {
-                                info!(event="RTP_LATCH_EXTERNAL", sip.call_id=%call_id, rtp.port=port, peer.ip=%src, "🌍 [LATCH-EXT] Dış Bacak Kilitlendi");
+                                // LOG LATCH EXTERNAL
+                                info!(
+                                    event = "RTP_LATCH_EXTERNAL",
+                                    trace_id = %call_id,
+                                    sip.call_id = %call_id,
+                                    rtp.port = port,
+                                    net.peer.ip = %src.ip(),
+                                    net.peer.port = src.port(),
+                                    "🌍 [LATCH-EXT] Dış Bacak Kilitlendi"
+                                );
                                 peer_external = Some(src);
                             }
                             if let Some(dst) = peer_internal { let _ = socket.send_to(&buf[..len], dst).await; }
@@ -145,7 +179,13 @@ async fn run_relay_loop(port: u16, mut stop_signal: tokio::sync::broadcast::Rece
                     }
                     Ok(Err(_)) => break,
                     Err(_) => {
-                        warn!(event="RTP_RELAY_TIMEOUT", sip.call_id=%call_id, rtp.port=port, "RTP Relay zaman aşımına uğradı.");
+                        warn!(
+                            event = "RTP_RELAY_TIMEOUT",
+                            trace_id = %call_id,
+                            sip.call_id = %call_id,
+                            rtp.port = port,
+                            "⌛ RTP Relay zaman aşımına uğradı."
+                        );
                         break;
                     },
                 }

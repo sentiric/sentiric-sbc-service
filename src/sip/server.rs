@@ -1,5 +1,3 @@
-// sentiric-sbc-service/src/sip/server.rs
-
 use crate::config::AppConfig;
 use crate::sip::engine::{SbcEngine, SipAction};
 use crate::rtp::engine::RtpEngine;
@@ -30,10 +28,12 @@ impl SipServer {
             .next()
             .context("Proxy SIP hedefi çözümlenemedi")?;
         
+        // Config Log (Startup)
         info!(
-            event = "SIP_INTERNAL_ROUTE_LOCKED",
-            target = %proxy_target_addr,
-            "🎯 Dahili SIP hedefi kilitlendi"
+            event = "SIP_CONFIG_LOADED",
+            proxy.target = %proxy_target_addr,
+            sip.bind = %bind_addr,
+            "SBC SIP Konfigürasyonu yüklendi"
         );
 
         Ok(Self {
@@ -49,7 +49,8 @@ impl SipServer {
             event = "SIP_SERVER_ACTIVE",
             bind_ip = %self.config.sip_bind_ip,
             port = self.config.sip_port,
-            "📡 SBC Aktif (Strict Topology Hiding)"
+            protocol = "UDP",
+            "📡 SBC Sinyalleşme Sunucusu Aktif"
         );
         let mut buf = vec![0u8; 65535];
         let socket = self.transport.get_socket();
@@ -63,22 +64,29 @@ impl SipServer {
                             if len < 4 { continue; }
                             match parser::parse(&buf[..len]) {
                                 Ok(packet) => {
+                                    // 100 Trying (Stateless)
                                     if packet.is_request && packet.method == Method::Invite {
                                         let _ = self.transport.send(&SipResponseFactory::create_100_trying(&packet).to_bytes(), src_addr).await;
                                     }
+                                    
+                                    // LOG INGRESS
+                                    let call_id = packet.get_header_value(HeaderName::CallId).cloned().unwrap_or_default();
+                                    let method = packet.method.as_str();
+                                    
+                                    // Engine Inspection
                                     if let SipAction::Forward(mut processed) = self.engine.inspect(packet, src_addr).await {
                                         self.route_packet(&mut processed, src_addr).await;
                                     }
                                 },
                                 Err(e) => warn!(
                                     event = "SIP_PARSE_ERROR",
-                                    source_ip = %src_addr,
+                                    net.peer.ip = %src_addr.ip(),
                                     error = %e,
-                                    "⚠️ Bozuk paket"
+                                    "⚠️ Bozuk veya geçersiz SIP paketi alındı"
                                 ),
                             }
                         },
-                        Err(e) => error!(event="SIP_SOCKET_ERROR", error=%e, "🔥 Socket hatası"),
+                        Err(e) => error!(event="SIP_SOCKET_ERROR", error=%e, "🔥 UDP Socket okuma hatası"),
                     }
                 }
             }
@@ -98,22 +106,28 @@ impl SipServer {
             let packet_bytes = packet.to_bytes();
             let debug_line = String::from_utf8_lossy(&packet_bytes[..packet_bytes.len().min(50)]);
             let call_id = packet.get_header_value(HeaderName::CallId).cloned().unwrap_or_default();
-            
+            let method = packet.method.as_str();
+
+            // LOG EGRESS (SUTS v4.0)
             info!(
-                event = "SIP_EGRESS",
+                event = "SIP_PACKET_SENT",
+                trace_id = %call_id, // Zorunlu Correlation ID
                 sip.call_id = %call_id,
-                target_ip = %target,
-                packet.start = %debug_line.trim_end(),
-                "📤 [SBC-EGRESS] Paket yönlendiriliyor"
+                sip.method = %method,
+                net.peer.ip = %target.ip(),
+                net.peer.port = target.port(),
+                packet.summary = %debug_line.trim_end(),
+                "📤 [SBC->PROXY] Paket iletiliyor"
             );
 
             if let Err(e) = self.transport.send(&packet_bytes, target).await {
                 error!(
                     event = "SIP_SEND_ERROR",
+                    trace_id = %call_id,
                     sip.call_id = %call_id,
-                    target_ip = %target,
+                    net.peer.ip = %target.ip(),
                     error = %e,
-                    "🔥 SIP gönderim hatası"
+                    "🔥 SIP paketi hedefe gönderilemedi"
                 );
             }
         }
