@@ -71,11 +71,10 @@ impl RtpEngine {
                 let stop_rx = tx.subscribe();
 
                 tokio::spawn(async move {
-                    // SUTS v4.0 LOG
+                    // [SUTS v4.0]: RTP Başlangıç Logu
                     info!(
                         event = "RTP_RELAY_STARTED",
-                        trace_id = %call_id_owned, // ZORUNLU
-                        sip.call_id = %call_id_owned,
+                        sip.call_id = %call_id_owned, 
                         rtp.port = port,
                         "🚀 [RTP-RELAY] Başlatıldı"
                     );
@@ -83,7 +82,6 @@ impl RtpEngine {
                     if let Err(e) = run_relay_loop(port, stop_rx, initial_peer, &call_id_owned).await {
                         error!(
                             event = "RTP_RELAY_ERROR",
-                            trace_id = %call_id_owned,
                             sip.call_id = %call_id_owned,
                             rtp.port = port,
                             error = %e,

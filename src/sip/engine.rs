@@ -1,5 +1,4 @@
-// sentiric-sbc-service/src/sip/engine.rs
-
+// src/sip/engine.rs
 use sentiric_sip_core::{SipPacket, SipRouter, HeaderName, Header, Method}; 
 use sentiric_sip_core::utils as sip_utils;
 use std::sync::Arc;
@@ -9,7 +8,7 @@ use crate::rtp::engine::RtpEngine;
 use crate::sip::handlers::security::SecurityHandler;
 use crate::sip::handlers::packet::PacketHandler;
 use crate::sip::handlers::media::MediaHandler;
-use tracing::{debug, info, warn}; // warn eklendi
+use tracing::{debug, info, warn};
 
 pub enum SipAction {
     Forward(SipPacket),
@@ -34,30 +33,30 @@ impl SbcEngine {
     }
 
     pub async fn inspect(&self, mut packet: SipPacket, src_addr: SocketAddr) -> SipAction {
-        // Güvenlik kontrolü en başta (Orijinal koddaki gibi)
+        let call_id = packet.get_header_value(HeaderName::CallId).cloned().unwrap_or_default();
+
+        // 1. GÜVENLİK
         if !self.security.check_access(src_addr.ip()) { 
             warn!(
                 event = "SIP_ACCESS_DENIED",
+                sip.call_id = %call_id,
                 net.src.ip = %src_addr.ip(),
-                "Erişim reddedildi"
+                "Erişim reddedildi (Rate Limit veya Blocklist)"
             );
             return SipAction::Drop; 
         }
         
-        let call_id = packet.get_header_value(HeaderName::CallId).cloned().unwrap_or_default();
-
-        // 1. İSTEK İŞLEME (Gelen Aramalar)
+        // 2. İSTEK İŞLEME
         if packet.is_request() {
             if !PacketHandler::sanitize(&packet) { 
                 warn!(
                     event = "SIP_SANITIZATION_FAILED", 
-                    trace_id = %call_id, 
-                    "Paket temizliği başarısız"
+                    sip.call_id = %call_id, 
+                    "Paket temizliği başarısız (User-Agent/Malform)"
                 );
                 return SipAction::Drop; 
             }
             
-            // Kritik routing mantığı orijinal yerinde
             SipRouter::fix_nat_via(&mut packet, src_addr);
             self.fix_request_uri_for_internal(&mut packet);
             
@@ -65,21 +64,20 @@ impl SbcEngine {
             if !self.media.process_sdp(&mut packet).await { 
                 warn!(
                     event = "SIP_SDP_PROCESS_FAIL", 
-                    trace_id = %call_id, 
+                    sip.call_id = %call_id, 
                     "SDP işlenemedi, paket düşürülüyor"
                 );
                 return SipAction::Drop; 
             }
         } 
         
-        // 2. YANIT İŞLEME (Giden 200 OK vb.)
+        // 3. YANIT İŞLEME
         if packet.is_response() {
-            // [NUCLEAR FIX]: Yanıt paketinde SDP varsa, kiraladığımız portu SDP'ye ZORLA yaz.
-            // Bu, loglardaki 50030 sızıntısını engelleyen ana müdahaledir.
+            // Yanıt paketinde SDP varsa, kiraladığımız portu SDP'ye ZORLA yaz.
             if !self.media.process_sdp(&mut packet).await { 
                 warn!(
                     event = "SIP_RESPONSE_SDP_FAIL",
-                    trace_id = %call_id,
+                    sip.call_id = %call_id,
                     "⚠️ Yanıt paketi SDP işlenemedi (Medya bacağı eksik olabilir)"
                 );
             }
@@ -89,6 +87,11 @@ impl SbcEngine {
 
         if packet.method == Method::Bye {
             let _ = self.rtp_engine.release_relay_by_call_id(&call_id).await;
+            info!(
+                event = "RTP_RELAY_RELEASED",
+                sip.call_id = %call_id,
+                "BYE sinyali üzerine RTP relay kapatıldı"
+            );
         }
         
         SipAction::Forward(packet)
@@ -126,9 +129,9 @@ impl SbcEngine {
         let call_id = packet.get_header_value(HeaderName::CallId).cloned().unwrap_or_default();
         debug!(
             event = "SIP_TOPOLOGY_HIDDEN",
-            trace_id = %call_id,
+            sip.call_id = %call_id,
             advertise.ip = %public_ip,
-            "🛡️ [HARDENING] Yanıt başarıyla maskelendi"
+            "🛡️ [HARDENING] Yanıt maskelendi"
         );
     }
 

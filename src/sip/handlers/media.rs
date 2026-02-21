@@ -1,5 +1,4 @@
-// sentiric-sbc-service/src/sip/handlers/media.rs
-
+// src/sip/handlers/media.rs
 use sentiric_sip_core::{SipPacket, HeaderName, Header, sdp::SdpManipulator};
 use std::sync::Arc;
 use crate::rtp::engine::RtpEngine;
@@ -74,7 +73,7 @@ impl MediaHandler {
             packet.headers.retain(|h| h.name != HeaderName::ContentLength);
             packet.headers.push(Header::new(HeaderName::ContentLength, packet.body.len().to_string()));
             
-            // ================== LOG İYİLEŞTİRME ==================
+            // [SUTS v4.0]: LOG
             info!(
                 event = "SDP_REWRITE_SUCCESS",
                 sip.call_id = %call_id,
@@ -82,7 +81,6 @@ impl MediaHandler {
                 advertise.ip = %advertise_ip,
                 "🛡️ [SDP-FIXED] SDP bağlantı bilgisi yeniden yazıldı."
             );
-            // =======================================================
         } else {
             warn!(
                 event="SDP_REWRITE_FAILED",

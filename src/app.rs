@@ -1,9 +1,9 @@
-// sentiric-sbc-service/src/app.rs
+// src/app.rs
 use crate::config::AppConfig;
 use crate::grpc::service::MySbcService;
 use crate::sip::server::SipServer;
 use crate::tls::load_server_tls_config;
-use crate::telemetry::SutsFormatter; // YENİ
+use crate::telemetry::SutsFormatter;
 use anyhow::{Context, Result};
 use sentiric_contracts::sentiric::sip::v1::sbc_service_server::SbcServiceServer;
 use std::convert::Infallible;
@@ -35,38 +35,25 @@ impl App {
         dotenvy::dotenv().ok();
         let config = Arc::new(AppConfig::load_from_env().context("Konfigürasyon dosyası yüklenemedi")?);
 
-        // --- GÜNCELLENMİŞ LOGLAMA BAŞLANGICI ---
-        let rust_log_env = env::var("RUST_LOG")
-            .unwrap_or_else(|_| config.rust_log.clone());
-        
-        let env_filter = EnvFilter::try_from_default_env()
-            .or_else(|_| EnvFilter::try_new(&rust_log_env))?;
-
+        // --- SUTS v4.0 LOGGING SETUP ---
+        let rust_log_env = env::var("RUST_LOG").unwrap_or_else(|_| config.rust_log.clone());
+        let env_filter = EnvFilter::try_from_default_env().or_else(|_| EnvFilter::try_new(&rust_log_env))?;
         let subscriber = Registry::default().with(env_filter);
-
+        
         if config.log_format == "json" {
-            // ================== KRİTİK MİMARİ DÜZELTME ==================
-            // Telemetry formatter artık mantıksal servis adını ve
-            // fiziksel sunucu adını kullanır.
             let suts_formatter = SutsFormatter::new(
-                "sbc-service".to_string(), // STANDART: Kısa, mantıksal servis adı
+                "sbc-service".to_string(),
                 config.service_version.clone(),
                 config.env.clone(),
-                config.node_hostname.clone(), // STANDART: Fiziksel sunucu adı
+                config.node_hostname.clone(),
             );
-            // ==========================================================
-            
-            subscriber
-                .with(fmt::layer().event_format(suts_formatter))
-                .init();
-   
+            subscriber.with(fmt::layer().event_format(suts_formatter)).init();
         } else {
-            // Development/Text Modu
+            // Development Mode (Pretty Print)
             subscriber.with(fmt::layer().compact()).init();
         }
-        // --- GÜNCELLENMİŞ LOGLAMA BİTİŞİ ---
+        // -------------------------------
 
-        // İlk SUTS uyumlu log örneği
         info!(
             event = "SYSTEM_STARTUP",
             service_name = "sentiric-sbc-service",
@@ -134,11 +121,7 @@ impl App {
             );
             
             if let Err(e) = server.await {
-                error!(
-                    event = "HTTP_SERVER_ERROR",
-                    error = %e, 
-                    "HTTP sunucusu hatayla sonlandı"
-                );
+                error!(event = "HTTP_SERVER_ERROR", error = %e, "HTTP sunucusu hatayla sonlandı");
             }
         });
 

@@ -1,3 +1,4 @@
+// src/sip/server.rs
 use crate::config::AppConfig;
 use crate::sip::engine::{SbcEngine, SipAction};
 use crate::rtp::engine::RtpEngine;
@@ -6,7 +7,7 @@ use sentiric_sip_core::{parser, SipTransport, SipPacket, HeaderName, SipRouter, 
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::mpsc;
-use tracing::{debug, error, info, warn}; // debug eklendi
+use tracing::{debug, error, info, warn}; 
 
 pub const DEFAULT_SIP_PORT: u16 = 5060;
 
@@ -68,24 +69,19 @@ impl SipServer {
                                         let _ = self.transport.send(&SipResponseFactory::create_100_trying(&packet).to_bytes(), src_addr).await;
                                     }
                                     
-                                    // --- DÜZELTME BAŞLANGICI ---
-                                    // Değişkenleri tanımladık ve şimdi LOG içinde kullanıyoruz.
+                                    // [SUTS v4.0]: INGRESS LOG
+                                    // sip.call_id otomatik olarak trace_id'ye terfi edecek.
                                     let call_id = packet.get_header_value(HeaderName::CallId).cloned().unwrap_or_default();
                                     let method = packet.method.as_str();
 
-                                    // INGRESS LOG (Gelen Paket)
-                                    // Bunu DEBUG seviyesinde tutuyoruz ki INFO akışı çok şişmesin,
-                                    // ama 'trace_id' sayesinde Observer'da filtrelenebilir olsun.
                                     debug!(
                                         event = "SIP_PACKET_RECEIVED",
-                                        trace_id = %call_id,
                                         sip.call_id = %call_id,
                                         sip.method = %method,
                                         net.src.ip = %src_addr.ip(),
                                         net.src.port = src_addr.port(),
                                         "📥 SIP paketi alındı"
                                     );
-                                    // --- DÜZELTME BİTİŞİ ---
                                     
                                     // Engine Inspection
                                     if let SipAction::Forward(mut processed) = self.engine.inspect(packet, src_addr).await {
@@ -122,10 +118,9 @@ impl SipServer {
             let call_id = packet.get_header_value(HeaderName::CallId).cloned().unwrap_or_default();
             let method = packet.method.as_str();
 
-            // LOG EGRESS (SUTS v4.0)
+            // [SUTS v4.0]: EGRESS LOG
             info!(
                 event = "SIP_EGRESS",
-                trace_id = %call_id, // Zorunlu Correlation ID
                 sip.call_id = %call_id,
                 sip.method = %method,
                 net.dst.ip = %target.ip(),
@@ -137,7 +132,6 @@ impl SipServer {
             if let Err(e) = self.transport.send(&packet_bytes, target).await {
                 error!(
                     event = "SIP_SEND_ERROR",
-                    trace_id = %call_id,
                     sip.call_id = %call_id,
                     net.dst.ip = %target.ip(),
                     error = %e,
