@@ -62,18 +62,37 @@ impl SipServer {
                     match res {
                         Ok((len, src_addr)) => {
                             if len < 4 { continue; }
+                            
+                            if len <= 4 && buf[..len].iter().all(|&b| b == b'\r' || b == b'\n' || b == 0) {
+                                continue;
+                            }
+
+                            let data = &buf[..len];
+
                             match parser::parse(&buf[..len]) {
                                 Ok(packet) => {
-                                    // 100 Trying (Stateless)
-                                    if packet.is_request && packet.method == Method::Invite {
-                                        let _ = self.transport.send(&SipResponseFactory::create_100_trying(&packet).to_bytes(), src_addr).await;
-                                    }
-                                    
-                                    // [SUTS v4.0]: INGRESS LOG
-                                    // sip.call_id otomatik olarak trace_id'ye terfi edecek.
                                     let call_id = packet.get_header_value(HeaderName::CallId).cloned().unwrap_or_default();
                                     let method = packet.method.as_str();
 
+                                    // [KRİTİK DÜZELTME]: 100 Trying Yanıtının Loglanması (ECO-SIP-002)
+                                    if packet.is_request && packet.method == Method::Invite {
+                                        let trying_packet = SipResponseFactory::create_100_trying(&packet);
+                                        let trying_bytes = trying_packet.to_bytes();
+                                        
+                                        info!(
+                                            event = "SIP_EGRESS",
+                                            sip.call_id = %call_id,
+                                            sip.method = "100",
+                                            net.dst.ip = %src_addr.ip(),
+                                            net.dst.port = src_addr.port(),
+                                            packet.summary = "SIP/2.0 100 Trying",
+                                            "📤 [SBC->UAC] 100 Trying gönderildi"
+                                        );
+
+                                        let _ = self.transport.send(&trying_bytes, src_addr).await;
+                                    }
+                                    
+                                    // INGRESS LOG
                                     debug!(
                                         event = "SIP_PACKET_RECEIVED",
                                         sip.call_id = %call_id,
@@ -118,7 +137,7 @@ impl SipServer {
             let call_id = packet.get_header_value(HeaderName::CallId).cloned().unwrap_or_default();
             let method = packet.method.as_str();
 
-            // [SUTS v4.0]: EGRESS LOG
+            // EGRESS LOG
             info!(
                 event = "SIP_EGRESS",
                 sip.call_id = %call_id,
