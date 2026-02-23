@@ -133,13 +133,18 @@ async fn run_relay_loop(port: u16, mut stop_signal: tokio::sync::broadcast::Rece
     let mut peer_internal: Option<SocketAddr> = None;
     let timeout = Duration::from_secs(60); 
     
-    // GÖZLEMLENEBİLİRLİK: Soketin gerçekten dinlemeye başladığını kanıtla
     debug!(
         event = "RTP_SOCKET_BOUND",
         sip.call_id = %call_id,
         rtp.port = port,
         "🎧 RTP Relay soketi IP adresine bağlandı ve dinliyor."
     );
+
+    // [YENİ]: Eğer dış hedef (telefon) IP'si biliniyorsa, hemen ona boş paket at (Hole Punching)
+    if let Some(target) = peer_external {
+        info!(event="RTP_HOLE_PUNCH_INIT", target=%target, "Agresif NAT delme başlatılıyor...");
+        let _ = socket.send_to(&[0u8; 4], target).await; // 4 byte null payload
+    }
 
     loop {
         tokio::select! {
@@ -149,9 +154,8 @@ async fn run_relay_loop(port: u16, mut stop_signal: tokio::sync::broadcast::Rece
                     Ok(Ok((len, src))) => {
                         let is_internal = is_internal_ip(src.ip());
                         
-                        // GÖZLEMLENEBİLİRLİK: Sokete vuran ilk paketlerin kanıtı (Flood yapmamak için sadece latch değiştiğinde logla)
-                        
                         if is_internal {
+                            // İÇERİDEN GELEN PAKET (Media Service -> SBC)
                             if peer_internal != Some(src) {
                                 if !(is_docker_gateway(src.ip()) && peer_internal.is_some()) {
                                     info!(
@@ -166,8 +170,16 @@ async fn run_relay_loop(port: u16, mut stop_signal: tokio::sync::broadcast::Rece
                                     peer_internal = Some(src);
                                 }
                             }
-                            if let Some(dst) = peer_external { let _ = socket.send_to(&buf[..len], dst).await; }
+                            
+                            // Eğer dış hedef belliyse yönlendir
+                            if let Some(dst) = peer_external { 
+                                let _ = socket.send_to(&buf[..len], dst).await; 
+                            } else {
+                                // Hedef belli değilse, gelen ilk paketi logla (Debug amaçlı)
+                                debug!(event="RTP_DROP_NO_EXT_PEER", len=len, "Dış hedef henüz yok, paket düşürüldü.");
+                            }
                         } else {
+                            // DIŞARIDAN GELEN PAKET (Telefon -> SBC)
                             if peer_external != Some(src) {
                                 info!(
                                     event = "RTP_LATCH_EXTERNAL",
@@ -176,7 +188,7 @@ async fn run_relay_loop(port: u16, mut stop_signal: tokio::sync::broadcast::Rece
                                     rtp.port = port,
                                     net.peer.ip = %src.ip(),
                                     net.peer.port = src.port(),
-                                    "🌍 [LATCH-EXT] Dış Bacak Kilitlendi"
+                                    "🌍 [LATCH-EXT] Dış Bacak Kilitlendi! (SES GELİYOR)"
                                 );
                                 peer_external = Some(src);
                             }
