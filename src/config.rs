@@ -88,7 +88,9 @@ impl AppConfig {
             env: env::var("ENV").unwrap_or_else(|_| "production".to_string()),
             rust_log: env::var("RUST_LOG").unwrap_or_else(|_| "info".to_string()),
             log_format: env::var("LOG_FORMAT").unwrap_or_else(|_| "text".to_string()), // [YENİ]
-            service_version: env::var("SERVICE_VERSION").unwrap_or_else(|_| "1.0.0".to_string()),
+
+            // [DÜZELTME]: Versiyonu derleme zamanında Cargo.toml'dan al (SUTS Resource Compliance)
+            service_version: env!("CARGO_PKG_VERSION").to_string(),
             
             cert_path: env::var("SBC_SERVICE_CERT_PATH").context("ZORUNLU: SBC_SERVICE_CERT_PATH")?,
             key_path: env::var("SBC_SERVICE_KEY_PATH").context("ZORUNLU: SBC_SERVICE_KEY_PATH")?,

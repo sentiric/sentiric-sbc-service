@@ -1,4 +1,5 @@
 // src/sip/server.rs
+
 use crate::config::AppConfig;
 use crate::sip::engine::{SbcEngine, SipAction};
 use crate::rtp::engine::RtpEngine;
@@ -72,7 +73,6 @@ impl SipServer {
                                     let call_id = packet.get_header_value(HeaderName::CallId).cloned().unwrap_or_default();
                                     let method = packet.method.as_str();
 
-                                    // 100 Trying Logu (Önceki düzeltme korundu)
                                     if packet.is_request && packet.method == Method::Invite {
                                         let trying_packet = SipResponseFactory::create_100_trying(&packet);
                                         let trying_bytes = trying_packet.to_bytes();
@@ -120,9 +120,18 @@ impl SipServer {
 
     async fn route_packet(&self, packet: &mut SipPacket, _src_addr: SocketAddr) {
         let target_addr = if packet.is_request() {
+            // İSTEK YÖNLENDİRME (Değişmedi)
             tokio::net::lookup_host(&self.config.proxy_sip_addr).await.ok().and_then(|mut i| i.next())
         } else { 
-            SipRouter::strip_top_via(packet);
+            // YANIT YÖNLENDİRME (KRİTİK DÜZELTME BURADA YAPILDI)
+            // ------------------------------------------------------------------
+            // ESKİ HATALI KOD: SipRouter::strip_top_via(packet); 
+            // Neden Hatalıydı? SBC, şeffaf proxy olduğu için kendi Via'sını eklememişti.
+            // Bu yüzden en üstteki Via'yı sildiğinde, aslında Müşterinin telefonunun adresini siliyordu!
+            // Sonuç olarak paket "hedefsiz" kalıyor ve telefon yanıtı alamıyordu.
+            // ------------------------------------------------------------------
+            
+            // DÜZELTME: Via başlığına dokunmadan, sadece içindeki adresi okuyoruz.
             packet.get_header_value(HeaderName::Via)
                   .and_then(|v| SipRouter::resolve_response_target(v, DEFAULT_SIP_PORT))
         };
@@ -130,12 +139,11 @@ impl SipServer {
         if let Some(target) = target_addr {
             let packet_bytes = packet.to_bytes();
             let debug_line = String::from_utf8_lossy(&packet_bytes[..packet_bytes.len().min(50)]);
-            let full_payload = String::from_utf8_lossy(&packet_bytes).to_string(); // TAM DÖKÜM
+            let full_payload = String::from_utf8_lossy(&packet_bytes).to_string(); 
             
             let call_id = packet.get_header_value(HeaderName::CallId).cloned().unwrap_or_default();
             let method = packet.method.as_str();
 
-            // TAM DÖKÜMLÜ EGRESS LOG
             info!(
                 event = "SIP_EGRESS_FULL",
                 sip.call_id = %call_id,
@@ -156,6 +164,14 @@ impl SipServer {
                     "🔥 SIP paketi hedefe gönderilemedi"
                 );
             }
+        } else {
+            // HEDEF BULUNAMADI LOGU (Yeni eklendi - Hata ayıklama için kritik)
+            let call_id = packet.get_header_value(HeaderName::CallId).cloned().unwrap_or_default();
+            error!(
+                event = "SIP_ROUTE_FAIL",
+                sip.call_id = %call_id,
+                "❌ Yanıt paketi için hedef adres (Via) çözümlenemedi. Paket düşürüldü."
+            );
         }
     }
 }
