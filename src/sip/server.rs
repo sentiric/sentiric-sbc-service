@@ -67,14 +67,12 @@ impl SipServer {
                                 continue;
                             }
 
-                            let data = &buf[..len];
-
                             match parser::parse(&buf[..len]) {
                                 Ok(packet) => {
                                     let call_id = packet.get_header_value(HeaderName::CallId).cloned().unwrap_or_default();
                                     let method = packet.method.as_str();
 
-                                    // [KRİTİK DÜZELTME]: 100 Trying Yanıtının Loglanması (ECO-SIP-002)
+                                    // 100 Trying Logu (Önceki düzeltme korundu)
                                     if packet.is_request && packet.method == Method::Invite {
                                         let trying_packet = SipResponseFactory::create_100_trying(&packet);
                                         let trying_bytes = trying_packet.to_bytes();
@@ -92,7 +90,6 @@ impl SipServer {
                                         let _ = self.transport.send(&trying_bytes, src_addr).await;
                                     }
                                     
-                                    // INGRESS LOG
                                     debug!(
                                         event = "SIP_PACKET_RECEIVED",
                                         sip.call_id = %call_id,
@@ -102,7 +99,6 @@ impl SipServer {
                                         "📥 SIP paketi alındı"
                                     );
                                     
-                                    // Engine Inspection
                                     if let SipAction::Forward(mut processed) = self.engine.inspect(packet, src_addr).await {
                                         self.route_packet(&mut processed, src_addr).await;
                                     }
@@ -134,18 +130,21 @@ impl SipServer {
         if let Some(target) = target_addr {
             let packet_bytes = packet.to_bytes();
             let debug_line = String::from_utf8_lossy(&packet_bytes[..packet_bytes.len().min(50)]);
+            let full_payload = String::from_utf8_lossy(&packet_bytes).to_string(); // TAM DÖKÜM
+            
             let call_id = packet.get_header_value(HeaderName::CallId).cloned().unwrap_or_default();
             let method = packet.method.as_str();
 
-            // EGRESS LOG
+            // TAM DÖKÜMLÜ EGRESS LOG
             info!(
-                event = "SIP_EGRESS",
+                event = "SIP_EGRESS_FULL",
                 sip.call_id = %call_id,
                 sip.method = %method,
                 net.dst.ip = %target.ip(),
                 net.dst.port = target.port(),
                 packet.summary = %debug_line.trim_end(),
-                "📤 [SBC->NEXT] Paket yönlendiriliyor"
+                payload = %full_payload,
+                "📤 [SBC->NEXT] Paket yönlendiriliyor (Tam Döküm)"
             );
 
             if let Err(e) = self.transport.send(&packet_bytes, target).await {

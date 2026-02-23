@@ -1,12 +1,12 @@
+// src/rtp/engine.rs
 use std::sync::Arc;
 use tokio::net::UdpSocket;
 use dashmap::DashMap;
 use std::net::{SocketAddr, IpAddr};
 use std::time::Duration;
-use tracing::{info, error, warn};
+use tracing::{info, error, warn, debug}; // DEBUG EKLENDİ
 use rand::Rng;
 
-// (Yardımcı fonksiyonlar is_internal_ip ve is_docker_gateway değişmeden kalabilir)
 fn is_internal_ip(ip: IpAddr) -> bool {
     match ip {
         IpAddr::V4(ipv4) => {
@@ -71,7 +71,6 @@ impl RtpEngine {
                 let stop_rx = tx.subscribe();
 
                 tokio::spawn(async move {
-                    // [SUTS v4.0]: RTP Başlangıç Logu
                     info!(
                         event = "RTP_RELAY_STARTED",
                         sip.call_id = %call_id_owned, 
@@ -133,6 +132,14 @@ async fn run_relay_loop(port: u16, mut stop_signal: tokio::sync::broadcast::Rece
     let mut peer_external = initial_external_peer;
     let mut peer_internal: Option<SocketAddr> = None;
     let timeout = Duration::from_secs(60); 
+    
+    // GÖZLEMLENEBİLİRLİK: Soketin gerçekten dinlemeye başladığını kanıtla
+    debug!(
+        event = "RTP_SOCKET_BOUND",
+        sip.call_id = %call_id,
+        rtp.port = port,
+        "🎧 RTP Relay soketi IP adresine bağlandı ve dinliyor."
+    );
 
     loop {
         tokio::select! {
@@ -141,10 +148,12 @@ async fn run_relay_loop(port: u16, mut stop_signal: tokio::sync::broadcast::Rece
                 match res {
                     Ok(Ok((len, src))) => {
                         let is_internal = is_internal_ip(src.ip());
+                        
+                        // GÖZLEMLENEBİLİRLİK: Sokete vuran ilk paketlerin kanıtı (Flood yapmamak için sadece latch değiştiğinde logla)
+                        
                         if is_internal {
                             if peer_internal != Some(src) {
                                 if !(is_docker_gateway(src.ip()) && peer_internal.is_some()) {
-                                    // LOG LATCH INTERNAL
                                     info!(
                                         event = "RTP_LATCH_INTERNAL",
                                         trace_id = %call_id,
@@ -160,7 +169,6 @@ async fn run_relay_loop(port: u16, mut stop_signal: tokio::sync::broadcast::Rece
                             if let Some(dst) = peer_external { let _ = socket.send_to(&buf[..len], dst).await; }
                         } else {
                             if peer_external != Some(src) {
-                                // LOG LATCH EXTERNAL
                                 info!(
                                     event = "RTP_LATCH_EXTERNAL",
                                     trace_id = %call_id,
