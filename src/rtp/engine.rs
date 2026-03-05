@@ -4,7 +4,7 @@ use tokio::net::UdpSocket;
 use dashmap::DashMap;
 use std::net::{SocketAddr, IpAddr};
 use std::time::Duration;
-use tracing::{info, error, warn, debug}; // DEBUG EKLENDİ
+use tracing::{info, error, warn, debug}; 
 use rand::Rng;
 
 fn is_internal_ip(ip: IpAddr) -> bool {
@@ -75,7 +75,7 @@ impl RtpEngine {
                         event = "RTP_RELAY_STARTED",
                         sip.call_id = %call_id_owned, 
                         rtp.port = port,
-                        "🚀 [RTP-RELAY] Başlatıldı"
+                        "🚀[RTP-RELAY] Başlatıldı"
                     );
                     
                     if let Err(e) = run_relay_loop(port, stop_rx, initial_peer, &call_id_owned).await {
@@ -125,12 +125,12 @@ impl RtpEngine {
     }
 }
 
-async fn run_relay_loop(port: u16, mut stop_signal: tokio::sync::broadcast::Receiver<()>, initial_external_peer: Option<SocketAddr>, call_id: &str) -> anyhow::Result<()> {
+async fn run_relay_loop(port: u16, mut stop_signal: tokio::sync::broadcast::Receiver<()>, initial_peer: Option<SocketAddr>, call_id: &str) -> anyhow::Result<()> {
     let addr = format!("0.0.0.0:{}", port);
     let socket = UdpSocket::bind(&addr).await?;
     let mut buf = [0u8; 2048];
-    let mut peer_external = initial_external_peer;
-    let mut peer_internal: Option<SocketAddr> = None;
+    let mut peer_external = None;
+    let mut peer_internal = None;
     let timeout = Duration::from_secs(60); 
     
     debug!(
@@ -140,10 +140,27 @@ async fn run_relay_loop(port: u16, mut stop_signal: tokio::sync::broadcast::Rece
         "🎧 RTP Relay soketi IP adresine bağlandı ve dinliyor."
     );
 
-    // [YENİ]: Eğer dış hedef (telefon) IP'si biliniyorsa, hemen ona boş paket at (Hole Punching)
-    if let Some(target) = peer_external {
-        info!(event="RTP_HOLE_PUNCH_INIT", target=%target, "Agresif NAT delme başlatılıyor...");
-        let _ = socket.send_to(&[0u8; 4], target).await; // 4 byte null payload
+    //[KRİTİK DÜZELTME]: Akıllı Peer Tanıma (Smart Routing & Latching)
+    if let Some(target) = initial_peer {
+        if is_internal_ip(target.ip()) {
+            info!(
+                event="RTP_PRE_LATCH", 
+                target=%target, 
+                "🏢 İç Hedef (Media Service) tespit edildi. Latch tetikleyici dummy paket gönderiliyor."
+            );
+            peer_internal = Some(target);
+            // Media Service'in latch olması için geçerli bir 12 byte dummy RTP Header gönderiyoruz (4 byte hata verdiriyordu)
+            let dummy_rtp =[0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xDE, 0xAD, 0xBE, 0xEF];
+            let _ = socket.send_to(&dummy_rtp, target).await;
+        } else {
+            info!(
+                event="RTP_HOLE_PUNCH_INIT", 
+                target=%target, 
+                "🌍 Dış Hedef tespit edildi. Agresif NAT delme başlatılıyor..."
+            );
+            peer_external = Some(target);
+            let _ = socket.send_to(&[0u8; 4], target).await; // Dış dünya için 4 byte yeterli
+        }
     }
 
     loop {
@@ -171,12 +188,8 @@ async fn run_relay_loop(port: u16, mut stop_signal: tokio::sync::broadcast::Rece
                                 }
                             }
                             
-                            // Eğer dış hedef belliyse yönlendir
                             if let Some(dst) = peer_external { 
                                 let _ = socket.send_to(&buf[..len], dst).await; 
-                            } else {
-                                // Hedef belli değilse, gelen ilk paketi logla (Debug amaçlı)
-                                debug!(event="RTP_DROP_NO_EXT_PEER", len=len, "Dış hedef henüz yok, paket düşürüldü.");
                             }
                         } else {
                             // DIŞARIDAN GELEN PAKET (Telefon -> SBC)
@@ -188,11 +201,13 @@ async fn run_relay_loop(port: u16, mut stop_signal: tokio::sync::broadcast::Rece
                                     rtp.port = port,
                                     net.peer.ip = %src.ip(),
                                     net.peer.port = src.port(),
-                                    "🌍 [LATCH-EXT] Dış Bacak Kilitlendi! (SES GELİYOR)"
+                                    "🌍[LATCH-EXT] Dış Bacak Kilitlendi! (SES GELİYOR)"
                                 );
                                 peer_external = Some(src);
                             }
-                            if let Some(dst) = peer_internal { let _ = socket.send_to(&buf[..len], dst).await; }
+                            if let Some(dst) = peer_internal { 
+                                let _ = socket.send_to(&buf[..len], dst).await; 
+                            }
                         }
                     }
                     Ok(Err(_)) => break,
