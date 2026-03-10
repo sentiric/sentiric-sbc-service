@@ -85,12 +85,18 @@ impl SbcEngine {
             self.apply_strict_topology_hiding(&mut packet);
         }
 
-        if packet.method == Method::Bye {
+        // ESKİ HALİ:
+        // if packet.method == Method::Bye {
+        //     let _ = self.rtp_engine.release_relay_by_call_id(&call_id).await; ...
+
+        // YENİ HALİ:
+        if packet.method == Method::Bye || packet.method == Method::Cancel {
             let _ = self.rtp_engine.release_relay_by_call_id(&call_id).await;
             info!(
                 event = "RTP_RELAY_RELEASED",
                 sip.call_id = %call_id,
-                "BYE sinyali üzerine RTP relay kapatıldı"
+                sip.method = %packet.method.as_str(),
+                "Çağrı sonlandırma (BYE/CANCEL) sinyali üzerine RTP relay kapatıldı"
             );
         }
         
