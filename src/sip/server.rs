@@ -8,14 +8,65 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn}; 
+use std::time::{Duration, Instant}; //[ARCH-COMPLIANCE] Eklendi
+use dashmap::DashMap; // [ARCH-COMPLIANCE] Eklendi
 
 pub const DEFAULT_SIP_PORT: u16 = 5060;
+
+//[SRE & ARCH-COMPLIANCE] DNS çözünürlük hatalarına karşı önbellek (Resilience)
+pub struct DnsCache {
+    cache: DashMap<String, (SocketAddr, Instant)>,
+}
+
+impl DnsCache {
+    pub fn new() -> Self {
+        Self { cache: DashMap::new() }
+    }
+
+    pub async fn resolve(&self, hostname: &str) -> Option<SocketAddr> {
+        // Eğer IP adresi verilmişse direkt dön
+        if let Ok(addr) = hostname.parse::<SocketAddr>() {
+            return Some(addr);
+        }
+
+        let now = Instant::now();
+        
+        // 1. Önbellekte var mı ve 60 saniyeden yeni mi?
+        if let Some(cached) = self.cache.get(hostname) {
+            let (addr, timestamp) = *cached;
+            if now.duration_since(timestamp) < Duration::from_secs(60) {
+                return Some(addr);
+            }
+        }
+
+        // 2. Yoksa veya süresi dolduysa ağdan çöz
+        match tokio::net::lookup_host(hostname).await.ok().and_then(|mut i| i.next()) {
+            Some(addr) => {
+                self.cache.insert(hostname.to_string(), (addr, now));
+                Some(addr)
+            }
+            None => {
+                // 3. Ağ hatası (Consul/DNS çöktü) durumunda "Stale Cache" (Bayat Veri) kullan
+                if let Some(cached) = self.cache.get(hostname) {
+                    warn!(
+                        event="DNS_STALE_FALLBACK", 
+                        host=%hostname, 
+                        "⚠️ DNS ağdan çözümlenemedi (Discovery kapalı olabilir), önbellekteki eski IP adresi kullanılıyor."
+                    );
+                    Some(cached.0)
+                } else {
+                    None
+                }
+            }
+        }
+    }
+}
 
 pub struct SipServer {
     config: Arc<AppConfig>,
     transport: Arc<SipTransport>,
     engine: SbcEngine,
-    // [ARCH-COMPLIANCE] Başlangıçtaki katı DNS çözümü ve _proxy_target_addr kaldırıldı.
+    dns_cache: Arc<DnsCache>, // [ARCH-COMPLIANCE] Eklendi
 }
 
 impl SipServer {
@@ -34,6 +85,7 @@ impl SipServer {
             config: config.clone(),
             transport: Arc::new(transport),
             engine: SbcEngine::new(config, rtp_engine),
+            dns_cache: Arc::new(DnsCache::new()), // [ARCH-COMPLIANCE] Eklendi
         })
     }
     
@@ -111,7 +163,8 @@ impl SipServer {
     }
 
     async fn route_packet(&self, packet: &mut SipPacket, src_addr: SocketAddr) {
-        let proxy_addr_opt = tokio::net::lookup_host(&self.config.proxy_sip_addr).await.ok().and_then(|mut i| i.next());
+        //[SRE & ARCH-COMPLIANCE] Her pakette ağ seviyesinde bloklu DNS lookup yapmak yerine, DnsCache kullanıyoruz.
+        let proxy_addr_opt = self.dns_cache.resolve(&self.config.proxy_sip_addr).await;
 
         let target_addr = if packet.is_request() {
             if let Some(proxy_addr) = proxy_addr_opt {
