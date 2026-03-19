@@ -1,9 +1,8 @@
-// src/sip/server.rs
-
+// Dosya: src/sip/server.rs
 use crate::config::AppConfig;
 use crate::sip::engine::{SbcEngine, SipAction};
 use crate::rtp::engine::RtpEngine;
-use anyhow::{Context, Result};
+use anyhow::{Result};
 use sentiric_sip_core::{parser, SipTransport, SipPacket, HeaderName, SipRouter, builder::SipResponseFactory, Method};
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -16,7 +15,7 @@ pub struct SipServer {
     config: Arc<AppConfig>,
     transport: Arc<SipTransport>,
     engine: SbcEngine,
-    _proxy_target_addr: SocketAddr, 
+    // [ARCH-COMPLIANCE] Başlangıçtaki katı DNS çözümü ve _proxy_target_addr kaldırıldı.
 }
 
 impl SipServer {
@@ -25,23 +24,16 @@ impl SipServer {
         let transport = SipTransport::new(&bind_addr).await?;
         let rtp_engine = Arc::new(RtpEngine::new(config.rtp_start_port, config.rtp_end_port));
         
-        let proxy_target_addr = tokio::net::lookup_host(&config.proxy_sip_addr)
-            .await?
-            .next()
-            .context("Proxy SIP hedefi çözümlenemedi")?;
-        
         info!(
             event = "SIP_CONFIG_LOADED",
-            proxy.target = %proxy_target_addr,
             sip.bind = %bind_addr,
-            "SBC SIP Konfigürasyonu yüklendi"
+            "SBC SIP Konfigürasyonu yüklendi (Lazy Routing Active)"
         );
 
         Ok(Self {
             config: config.clone(),
             transport: Arc::new(transport),
             engine: SbcEngine::new(config, rtp_engine),
-            _proxy_target_addr: proxy_target_addr,
         })
     }
     
@@ -84,7 +76,7 @@ impl SipServer {
                                             net.dst.ip = %src_addr.ip(),
                                             net.dst.port = src_addr.port(),
                                             packet.summary = "SIP/2.0 100 Trying",
-                                            "📤 [SBC->UAC] 100 Trying gönderildi"
+                                            "📤[SBC->UAC] 100 Trying gönderildi"
                                         );
 
                                         let _ = self.transport.send(&trying_bytes, src_addr).await;
@@ -118,20 +110,24 @@ impl SipServer {
         }
     }
 
-    async fn route_packet(&self, packet: &mut SipPacket, _src_addr: SocketAddr) {
+    async fn route_packet(&self, packet: &mut SipPacket, src_addr: SocketAddr) {
+        let proxy_addr_opt = tokio::net::lookup_host(&self.config.proxy_sip_addr).await.ok().and_then(|mut i| i.next());
+
         let target_addr = if packet.is_request() {
-            // İSTEK YÖNLENDİRME (Değişmedi)
-            tokio::net::lookup_host(&self.config.proxy_sip_addr).await.ok().and_then(|mut i| i.next())
+            if let Some(proxy_addr) = proxy_addr_opt {
+                if src_addr.ip() == proxy_addr.ip() {
+                    // [MİMARİ DÜZELTME]: OUTBOUND İSTEK (Proxy -> UAC).
+                    // Paket proxy'den geliyorsa, bunu doğrudan Request-URI'nin gösterdiği müşteriye ilet.
+                    sentiric_sip_core::utils::extract_socket_addr(&packet.uri)
+                } else {
+                    // INBOUND İSTEK (UAC -> Proxy).
+                    Some(proxy_addr)
+                }
+            } else {
+                None
+            }
         } else { 
-            // YANIT YÖNLENDİRME (KRİTİK DÜZELTME BURADA YAPILDI)
-            // ------------------------------------------------------------------
-            // ESKİ HATALI KOD: SipRouter::strip_top_via(packet); 
-            // Neden Hatalıydı? SBC, şeffaf proxy olduğu için kendi Via'sını eklememişti.
-            // Bu yüzden en üstteki Via'yı sildiğinde, aslında Müşterinin telefonunun adresini siliyordu!
-            // Sonuç olarak paket "hedefsiz" kalıyor ve telefon yanıtı alamıyordu.
-            // ------------------------------------------------------------------
-            
-            // DÜZELTME: Via başlığına dokunmadan, sadece içindeki adresi okuyoruz.
+            // YANIT YÖNLENDİRME (Via bazlı)
             packet.get_header_value(HeaderName::Via)
                   .and_then(|v| SipRouter::resolve_response_target(v, DEFAULT_SIP_PORT))
         };
@@ -152,7 +148,7 @@ impl SipServer {
                 net.dst.port = target.port(),
                 packet.summary = %debug_line.trim_end(),
                 payload = %full_payload,
-                "📤 [SBC->NEXT] Paket yönlendiriliyor (Tam Döküm)"
+                "📤[SBC->NEXT] Paket yönlendiriliyor (Tam Döküm)"
             );
 
             if let Err(e) = self.transport.send(&packet_bytes, target).await {
@@ -165,12 +161,11 @@ impl SipServer {
                 );
             }
         } else {
-            // HEDEF BULUNAMADI LOGU (Yeni eklendi - Hata ayıklama için kritik)
             let call_id = packet.get_header_value(HeaderName::CallId).cloned().unwrap_or_default();
             error!(
                 event = "SIP_ROUTE_FAIL",
                 sip.call_id = %call_id,
-                "❌ Yanıt paketi için hedef adres (Via) çözümlenemedi. Paket düşürüldü."
+                "❌ Yanıt veya Dışarı giden paket için hedef adres çözümlenemedi. Paket düşürüldü."
             );
         }
     }
