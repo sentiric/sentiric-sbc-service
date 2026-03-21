@@ -8,12 +8,12 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn}; 
-use std::time::{Duration, Instant}; //[ARCH-COMPLIANCE] Eklendi
-use dashmap::DashMap; // [ARCH-COMPLIANCE] Eklendi
+use std::time::{Duration, Instant}; 
+use dashmap::DashMap; 
 
 pub const DEFAULT_SIP_PORT: u16 = 5060;
 
-//[SRE & ARCH-COMPLIANCE] DNS çözünürlük hatalarına karşı önbellek (Resilience)
+// [SRE & ARCH-COMPLIANCE] DNS çözünürlük hatalarına karşı önbellek (Resilience)
 pub struct DnsCache {
     cache: DashMap<String, (SocketAddr, Instant)>,
 }
@@ -39,26 +39,45 @@ impl DnsCache {
             }
         }
 
-        // 2. Yoksa veya süresi dolduysa ağdan çöz
-        match tokio::net::lookup_host(hostname).await.ok().and_then(|mut i| i.next()) {
-            Some(addr) => {
-                self.cache.insert(hostname.to_string(), (addr, now));
-                Some(addr)
-            }
-            None => {
-                // 3. Ağ hatası (Consul/DNS çöktü) durumunda "Stale Cache" (Bayat Veri) kullan
-                if let Some(cached) = self.cache.get(hostname) {
-                    warn!(
-                        event="DNS_STALE_FALLBACK", 
+        // 2. [MİMARİ DÜZELTME]: DNS Cold Start Koruması (Exponential Backoff)
+        // gRPC bunu kendi içinde yapıyor ama UDP SIP sunucumuz manuel yapmalı.
+        // Consul DNS'in anında yanıt veremediği ilk saniyelerde paketi düşürmemek için
+        // 100ms -> 200ms -> 400ms -> 800ms -> 1600ms şeklinde bekleyerek tekrar dener.
+        let mut backoff = 100;
+        for attempt in 1..=5 {
+            match tokio::net::lookup_host(hostname).await {
+                Ok(mut addrs) => {
+                    if let Some(addr) = addrs.next() {
+                        self.cache.insert(hostname.to_string(), (addr, now));
+                        return Some(addr);
+                    }
+                }
+                Err(e) => {
+                    tracing::debug!(
+                        event="DNS_RETRY", 
+                        attempt=attempt, 
                         host=%hostname, 
-                        "⚠️ DNS ağdan çözümlenemedi (Discovery kapalı olabilir), önbellekteki eski IP adresi kullanılıyor."
+                        error=%e, 
+                        "DNS çözümü gecikti, tekrar deneniyor..."
                     );
-                    Some(cached.0)
-                } else {
-                    None
                 }
             }
+            tokio::time::sleep(Duration::from_millis(backoff)).await;
+            backoff *= 2; 
         }
+
+        // 3. Ağ hatası devam ediyorsa "Stale Cache" (Bayat Veri) kullan
+        if let Some(cached) = self.cache.get(hostname) {
+            warn!(
+                event="DNS_STALE_FALLBACK", 
+                host=%hostname, 
+                "⚠️ DNS ağdan çözümlenemedi (Discovery kapalı olabilir), önbellekteki eski IP adresi kullanılıyor."
+            );
+            return Some(cached.0);
+        }
+        
+        error!(event="DNS_FATAL", host=%hostname, "❌ DNS çözümlenemedi ve önbellekte kayıt yok!");
+        None
     }
 }
 
@@ -66,7 +85,7 @@ pub struct SipServer {
     config: Arc<AppConfig>,
     transport: Arc<SipTransport>,
     engine: SbcEngine,
-    dns_cache: Arc<DnsCache>, // [ARCH-COMPLIANCE] Eklendi
+    dns_cache: Arc<DnsCache>, 
 }
 
 impl SipServer {
@@ -85,7 +104,7 @@ impl SipServer {
             config: config.clone(),
             transport: Arc::new(transport),
             engine: SbcEngine::new(config, rtp_engine),
-            dns_cache: Arc::new(DnsCache::new()), // [ARCH-COMPLIANCE] Eklendi
+            dns_cache: Arc::new(DnsCache::new()), 
         })
     }
     
@@ -163,24 +182,19 @@ impl SipServer {
     }
 
     async fn route_packet(&self, packet: &mut SipPacket, src_addr: SocketAddr) {
-        //[SRE & ARCH-COMPLIANCE] Her pakette ağ seviyesinde bloklu DNS lookup yapmak yerine, DnsCache kullanıyoruz.
         let proxy_addr_opt = self.dns_cache.resolve(&self.config.proxy_sip_addr).await;
 
         let target_addr = if packet.is_request() {
             if let Some(proxy_addr) = proxy_addr_opt {
                 if src_addr.ip() == proxy_addr.ip() {
-                    // [MİMARİ DÜZELTME]: OUTBOUND İSTEK (Proxy -> UAC).
-                    // Paket proxy'den geliyorsa, bunu doğrudan Request-URI'nin gösterdiği müşteriye ilet.
                     sentiric_sip_core::utils::extract_socket_addr(&packet.uri)
                 } else {
-                    // INBOUND İSTEK (UAC -> Proxy).
                     Some(proxy_addr)
                 }
             } else {
                 None
             }
         } else { 
-            // YANIT YÖNLENDİRME (Via bazlı)
             packet.get_header_value(HeaderName::Via)
                   .and_then(|v| SipRouter::resolve_response_target(v, DEFAULT_SIP_PORT))
         };
