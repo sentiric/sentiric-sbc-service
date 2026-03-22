@@ -17,7 +17,7 @@ ENV GIT_COMMIT=${GIT_COMMIT}
 ENV BUILD_DATE=${BUILD_DATE}
 ENV SERVICE_VERSION=${SERVICE_VERSION}
 
-RUN cargo build --release --bin sentiric-sbc-service
+RUN cargo build --release --bin sentiric-sip-sbc-service
 
 # --- STAGE 2: Final (Minimal) Image ---
 FROM debian:bookworm-slim
@@ -36,8 +36,8 @@ ENV SERVICE_VERSION=${SERVICE_VERSION}
 
 WORKDIR /app
 
-COPY --from=builder /app/target/release/sentiric-sbc-service .
+COPY --from=builder /app/target/release/sentiric-sip-sbc-service .
 
 RUN useradd -m -u 1001 appuser
 USER appuser
-ENTRYPOINT ["./sentiric-sbc-service"]
+ENTRYPOINT ["./sentiric-sip-sbc-service"]

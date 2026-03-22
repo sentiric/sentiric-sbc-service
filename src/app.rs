@@ -26,7 +26,7 @@ async fn handle_http_request(_req: Request<Body>) -> Result<Response<Body>, Infa
     Ok(Response::builder()
         .status(StatusCode::OK)
         .header("Content-Type", "application/json")
-        .body(Body::from(r#"{"status":"ok", "service": "sbc-service"}"#))
+        .body(Body::from(r#"{"status":"ok", "service": "sip-sbc-service"}"#))
         .unwrap())
 }
 
@@ -42,7 +42,7 @@ impl App {
         
         if config.log_format == "json" {
             let suts_formatter = SutsFormatter::new(
-                "sbc-service".to_string(),
+                "sip-sbc-service".to_string(),
                 config.service_version.clone(),
                 config.env.clone(),
                 config.node_hostname.clone(),
@@ -56,7 +56,7 @@ impl App {
 
         info!(
             event = "SYSTEM_STARTUP",
-            service_name = "sentiric-sbc-service",
+            service_name = "sip-sbc-service",
             version = %config.service_version,
             profile = %config.env,
             "🚀 Servis başlatılıyor (SUTS v4.0 Active)..."

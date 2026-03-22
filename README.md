@@ -1,10 +1,10 @@
-# 🔒 Sentiric SBC Service
+# 🔒 Sentiric Sip SBC Service
 
 [![Status](https://img.shields.io/badge/status-vision-lightgrey.svg)]()
 [![Language](https://img.shields.io/badge/language-Rust-orange.svg)]()
 [![Protocol](https://img.shields.io/badge/protocol-gRPC_&_SIP-green.svg)]()
 
-**Sentiric SBC (Session Border Controller) Service**, SIP Gateway'den gelen ham sinyalleşme trafiğini işlemek ve yönlendirme kararı vermek için kullanılan katmandır. Bu servis, SIP paketlerini derinlemesine analiz eder ve bir dizi güvenlik ve trafik kontrol kuralına göre trafiği `sentiric-proxy-service`'e iletmek veya reddetmekten sorumludur.
+**Sentiric SBC (Session Border Controller) Service**, SIP Gateway'den gelen ham sinyalleşme trafiğini işlemek ve yönlendirme kararı vermek için kullanılan katmandır. Bu servis, SIP paketlerini derinlemesine analiz eder ve bir dizi güvenlik ve trafik kontrol kuralına göre trafiği `sentiric-sip-proxy-service`'e iletmek veya reddetmekten sorumludur.
 
 Bu servis, ağ sınırında (Edge) çalışmak üzere tasarlanmıştır.
 

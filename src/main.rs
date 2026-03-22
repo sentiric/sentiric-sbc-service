@@ -1,6 +1,6 @@
 // sentiric-sbc-service/src/main.rs
 use anyhow::{Context, Result};
-use sentiric_sbc_service::app::App;
+use sentiric_sip_sbc_service::app::App;
 use std::process;
 
 fn main() -> Result<()> {

@@ -1463,8 +1463,19 @@ dependencies = [
 ]
 
 [[package]]
-name = "sentiric-sbc-service"
-version = "1.4.8"
+name = "sentiric-sip-core"
+version = "1.5.6"
+source = "git+https://github.com/sentiric/sentiric-sip-core.git?tag=v1.5.6#18fb069dec1352389299b647679972b905546abc"
+dependencies = [
+ "once_cell",
+ "regex",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "sentiric-sip-sbc-service"
+version = "1.4.9"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1489,17 +1500,6 @@ dependencies = [
  "tracing",
  "tracing-appender",
  "tracing-subscriber",
-]
-
-[[package]]
-name = "sentiric-sip-core"
-version = "1.5.6"
-source = "git+https://github.com/sentiric/sentiric-sip-core.git?tag=v1.5.6#18fb069dec1352389299b647679972b905546abc"
-dependencies = [
- "once_cell",
- "regex",
- "tokio",
- "tracing",
 ]
 
 [[package]]

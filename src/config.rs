@@ -1,4 +1,4 @@
-// sentiric-sbc-service/src/config.rs
+// src/config.rs
 use anyhow::{Context, Result};
 use std::env;
 use std::net::SocketAddr;
@@ -35,36 +35,22 @@ pub struct AppConfig {
 
 impl AppConfig {
     pub fn load_from_env() -> Result<Self> {
-        let grpc_port = env::var("SBC_SERVICE_GRPC_PORT").unwrap_or_else(|_| "13091".to_string());
-        let http_port = env::var("SBC_SERVICE_HTTP_PORT").unwrap_or_else(|_| "13090".to_string());
-        
-        let sip_port_str = env::var("SBC_SERVICE_SIP_PORT").unwrap_or_else(|_| "13094".to_string());
+        let grpc_port = env::var("SIP_SBC_SERVICE_GRPC_PORT").unwrap_or_else(|_| "13091".to_string());
+        let http_port = env::var("SIP_SBC_SERVICE_HTTP_PORT").unwrap_or_else(|_| "13090".to_string());
+
+        let sip_port_str = env::var("SIP_SBC_SERVICE_SIP_PORT").unwrap_or_else(|_| "13094".to_string());
         let sip_port = sip_port_str.parse::<u16>().context("Geçersiz SIP portu")?;
-        
-        let advertised_port = env::var("SBC_ADVERTISED_PORT")
-            .unwrap_or_else(|_| "5060".to_string())
-            .parse::<u16>()
-            .unwrap_or(5060);
+        let advertised_port = env::var("SIP_SBC_ADVERTISED_PORT").unwrap_or_else(|_| "5060".to_string()).parse::<u16>().unwrap_or(5060);
 
         let grpc_addr: SocketAddr = format!("[::]:{}", grpc_port).parse()?;
         let http_addr: SocketAddr = format!("[::]:{}", http_port).parse()?;
-        
-        let proxy_target = env::var("PROXY_SERVICE_SIP_TARGET")
-            .context("ZORUNLU: PROXY_SERVICE_SIP_TARGET eksik")?;
 
-        let public_ip = env::var("SBC_SERVICE_PUBLIC_IP").unwrap_or_else(|_| "127.0.0.1".to_string());
-        
-        let internal_ip = env::var("SBC_SERVICE_INTERNAL_IP")
-            .or_else(|_| env::var("NODE_IP"))
-            .unwrap_or_else(|_| "127.0.0.1".to_string());
-
-        let b2bua_port = env::var("B2BUA_SERVICE_SIP_PORT")
-            .unwrap_or_else(|_| "13084".to_string())
-            .parse::<u16>()?;
-
-        let rtp_start = env::var("SBC_RTP_START_PORT").unwrap_or_else(|_| "30000".to_string()).parse()?;
-        let rtp_end = env::var("SBC_RTP_END_PORT").unwrap_or_else(|_| "30100".to_string()).parse()?;
-
+        let proxy_target = env::var("SIP_PROXY_SERVICE_SIP_TARGET").context("ZORUNLU: SIP_PROXY_SERVICE_SIP_TARGET eksik")?;
+        let public_ip = env::var("SIP_SBC_SERVICE_PUBLIC_IP").unwrap_or_else(|_| "127.0.0.1".to_string());
+        let internal_ip = env::var("SIP_SBC_SERVICE_INTERNAL_IP").unwrap_or_else(|_| "127.0.0.1".to_string());
+        let b2bua_port = env::var("SIP_B2BUA_SERVICE_SIP_PORT").unwrap_or_else(|_| "13084".to_string()).parse::<u16>()?;
+        let rtp_start = env::var("SIP_SBC_RTP_START_PORT").unwrap_or_else(|_| "30000".to_string()).parse()?;
+        let rtp_end = env::var("SIP_SBC_RTP_END_PORT").unwrap_or_else(|_| "30100".to_string()).parse()?;
 
        Ok(AppConfig {
             grpc_listen_addr: grpc_addr,
@@ -92,8 +78,9 @@ impl AppConfig {
             // [DÜZELTME]: Versiyonu derleme zamanında Cargo.toml'dan al (SUTS Resource Compliance)
             service_version: env!("CARGO_PKG_VERSION").to_string(),
             
-            cert_path: env::var("SBC_SERVICE_CERT_PATH").context("ZORUNLU: SBC_SERVICE_CERT_PATH")?,
-            key_path: env::var("SBC_SERVICE_KEY_PATH").context("ZORUNLU: SBC_SERVICE_KEY_PATH")?,
+            // Certs
+            cert_path: env::var("SIP_SBC_SERVICE_CERT_PATH").context("ZORUNLU: CERT PATH")?,
+            key_path: env::var("SIP_SBC_SERVICE_KEY_PATH").context("ZORUNLU: KEY PATH")?,
             ca_path: env::var("GRPC_TLS_CA_PATH").context("ZORUNLU: GRPC_TLS_CA_PATH")?,
         })
     }
