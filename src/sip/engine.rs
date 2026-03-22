@@ -1,4 +1,4 @@
-// src/sip/engine.rs
+// Dosya: sentiric-sip-sbc-service/src/sip/engine.rs
 use sentiric_sip_core::{SipPacket, SipRouter, HeaderName, Header, Method}; 
 use sentiric_sip_core::utils as sip_utils;
 use std::sync::Arc;
@@ -8,7 +8,7 @@ use crate::rtp::engine::RtpEngine;
 use crate::sip::handlers::security::SecurityHandler;
 use crate::sip::handlers::packet::PacketHandler;
 use crate::sip::handlers::media::MediaHandler;
-use tracing::{debug, info, warn};
+use tracing::{info, warn};
 
 pub enum SipAction {
     Forward(SipPacket),
@@ -85,11 +85,6 @@ impl SbcEngine {
             self.apply_strict_topology_hiding(&mut packet);
         }
 
-        // ESKİ HALİ:
-        // if packet.method == Method::Bye {
-        //     let _ = self.rtp_engine.release_relay_by_call_id(&call_id).await; ...
-
-        // YENİ HALİ:
         if packet.method == Method::Bye || packet.method == Method::Cancel {
             let _ = self.rtp_engine.release_relay_by_call_id(&call_id).await;
             info!(
@@ -119,24 +114,35 @@ impl SbcEngine {
             }
         });
 
-        // 2. RECORD-ROUTE & CONTACT MASKESİ
-        packet.headers.retain(|h| h.name != HeaderName::RecordRoute && h.name != HeaderName::Contact);
+        // 2. CSeq'ten Method'u bul (REGISTER ise Contact'a dokunmayacağız)
+        let mut is_register = false;
+        if let Some(cseq) = packet.get_header_value(HeaderName::CSeq) {
+            if cseq.to_uppercase().contains("REGISTER") {
+                is_register = true;
+            }
+        }
 
+        // 3. RECORD-ROUTE & CONTACT MASKESİ
+        packet.headers.retain(|h| h.name != HeaderName::RecordRoute);
         let rr_val = format!("<sip:{}:{};lr>", public_ip, public_port);
         packet.headers.insert(0, Header::new(HeaderName::RecordRoute, rr_val));
 
-        let contact_val = format!("<sip:b2bua@{}:{}>", public_ip, public_port);
-        packet.headers.push(Header::new(HeaderName::Contact, contact_val));
+        if !is_register {
+            packet.headers.retain(|h| h.name != HeaderName::Contact);
+            let contact_val = format!("<sip:b2bua@{}:{}>", public_ip, public_port);
+            packet.headers.push(Header::new(HeaderName::Contact, contact_val));
+        }
         
         // Sunucu Kimliğini Gizle
         packet.headers.retain(|h| h.name != HeaderName::Server && h.name != HeaderName::UserAgent);
         packet.headers.push(Header::new(HeaderName::Server, "Sentiric-SBC".to_string()));
 
         let call_id = packet.get_header_value(HeaderName::CallId).cloned().unwrap_or_default();
-        debug!(
+        tracing::debug!(
             event = "SIP_TOPOLOGY_HIDDEN",
             sip.call_id = %call_id,
             advertise.ip = %public_ip,
+            is_register = is_register,
             "🛡️ [HARDENING] Yanıt maskelendi"
         );
     }
