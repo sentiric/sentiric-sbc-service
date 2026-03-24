@@ -35,7 +35,6 @@ impl SbcEngine {
     pub async fn inspect(&self, mut packet: SipPacket, src_addr: SocketAddr) -> SipAction {
         let call_id = packet.get_header_value(HeaderName::CallId).cloned().unwrap_or_default();
 
-        // 1. GÜVENLİK
         if !self.security.check_access(src_addr.ip()) { 
             warn!(
                 event = "SIP_ACCESS_DENIED",
@@ -46,7 +45,6 @@ impl SbcEngine {
             return SipAction::Drop; 
         }
         
-        // 2. İSTEK İŞLEME
         if packet.is_request() {
             if !PacketHandler::sanitize(&packet) { 
                 warn!(
@@ -60,7 +58,6 @@ impl SbcEngine {
             SipRouter::fix_nat_via(&mut packet, src_addr);
             self.fix_request_uri_for_internal(&mut packet);
             
-            // Medya işleme (SDP varsa Port Ayır)
             if !self.media.process_sdp(&mut packet).await { 
                 warn!(
                     event = "SIP_SDP_PROCESS_FAIL", 
@@ -71,9 +68,7 @@ impl SbcEngine {
             }
         } 
         
-        // 3. YANIT İŞLEME
         if packet.is_response() {
-            // Yanıt paketinde SDP varsa, kiraladığımız portu SDP'ye ZORLA yaz.
             if !self.media.process_sdp(&mut packet).await { 
                 warn!(
                     event = "SIP_RESPONSE_SDP_FAIL",
@@ -102,7 +97,11 @@ impl SbcEngine {
         let public_ip = &self.config.sip_public_ip;
         let public_port = self.config.sip_advertised_port;
 
-        // 1. VIA TEMİZLİĞİ: İç ağ izlerini sil
+        // Orijinal kullanıcı adını (username) contact başlığından al (Hardcode b2bua engellendi)
+        let old_contact_val = packet.get_header_value(HeaderName::Contact).cloned().unwrap_or_default();
+        let user_part = sip_utils::extract_username_from_uri(&old_contact_val);
+        let final_user = if user_part.is_empty() { "sbc".to_string() } else { user_part };
+
         packet.headers.retain(|h| {
             if h.name == HeaderName::Via {
                 !h.value.contains("proxy-service") && 
@@ -114,7 +113,6 @@ impl SbcEngine {
             }
         });
 
-        // 2. CSeq'ten Method'u bul (REGISTER ise Contact'a dokunmayacağız)
         let mut is_register = false;
         if let Some(cseq) = packet.get_header_value(HeaderName::CSeq) {
             if cseq.to_uppercase().contains("REGISTER") {
@@ -122,18 +120,17 @@ impl SbcEngine {
             }
         }
 
-        // 3. RECORD-ROUTE & CONTACT MASKESİ
         packet.headers.retain(|h| h.name != HeaderName::RecordRoute);
         let rr_val = format!("<sip:{}:{};lr>", public_ip, public_port);
         packet.headers.insert(0, Header::new(HeaderName::RecordRoute, rr_val));
 
         if !is_register {
             packet.headers.retain(|h| h.name != HeaderName::Contact);
-            let contact_val = format!("<sip:b2bua@{}:{}>", public_ip, public_port);
+            //[ARCH-COMPLIANCE]: B2BUA yerine P2P ve diğer çağrıları desteklemek için dinamik Contact.
+            let contact_val = format!("<sip:{}@{}:{}>", final_user, public_ip, public_port);
             packet.headers.push(Header::new(HeaderName::Contact, contact_val));
         }
         
-        // Sunucu Kimliğini Gizle
         packet.headers.retain(|h| h.name != HeaderName::Server && h.name != HeaderName::UserAgent);
         packet.headers.push(Header::new(HeaderName::Server, "Sentiric-SBC".to_string()));
 
