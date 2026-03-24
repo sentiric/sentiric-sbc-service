@@ -2,13 +2,28 @@
 use sentiric_sip_core::{SipPacket, SipRouter, HeaderName, Header, Method}; 
 use sentiric_sip_core::utils as sip_utils;
 use std::sync::Arc;
-use std::net::SocketAddr;
+use std::net::{SocketAddr, IpAddr};
 use crate::config::AppConfig;
 use crate::rtp::engine::RtpEngine;
 use crate::sip::handlers::security::SecurityHandler;
 use crate::sip::handlers::packet::PacketHandler;
 use crate::sip::handlers::media::MediaHandler;
 use tracing::{info, warn};
+
+// İç IP kontrolü (Proxy veya B2BUA trafiğini algılamak için)
+fn is_internal_ip(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(ipv4) => {
+            let octets = ipv4.octets();
+            if octets[0] == 10 || octets[0] == 127 { return true; }
+            if octets[0] == 172 && (octets[1] >= 16 && octets[1] <= 31) { return true; }
+            if octets[0] == 192 && octets[1] == 168 { return true; }
+            if octets[0] == 100 && (octets[1] >= 64 && octets[1] <= 127) { return true; }
+            false
+        }
+        IpAddr::V6(ipv6) => ipv6.is_loopback(),
+    }
+}
 
 pub enum SipAction {
     Forward(SipPacket),
@@ -77,7 +92,7 @@ impl SbcEngine {
                 );
             }
             
-            self.apply_strict_topology_hiding(&mut packet);
+            self.apply_smart_topology_hiding(&mut packet, src_addr);
         }
 
         if packet.method == Method::Bye || packet.method == Method::Cancel {
@@ -93,11 +108,10 @@ impl SbcEngine {
         SipAction::Forward(packet)
     }
 
-    fn apply_strict_topology_hiding(&self, packet: &mut SipPacket) {
+    fn apply_smart_topology_hiding(&self, packet: &mut SipPacket, src_addr: SocketAddr) {
         let public_ip = &self.config.sip_public_ip;
         let public_port = self.config.sip_advertised_port;
 
-        // Orijinal kullanıcı adını (username) contact başlığından al (Hardcode b2bua engellendi)
         let old_contact_val = packet.get_header_value(HeaderName::Contact).cloned().unwrap_or_default();
         let user_part = sip_utils::extract_username_from_uri(&old_contact_val);
         let final_user = if user_part.is_empty() { "sbc".to_string() } else { user_part };
@@ -124,11 +138,25 @@ impl SbcEngine {
         let rr_val = format!("<sip:{}:{};lr>", public_ip, public_port);
         packet.headers.insert(0, Header::new(HeaderName::RecordRoute, rr_val));
 
+        // [ARCH-COMPLIANCE]: Akıllı Topoloji Gizleme (Sadece iç IP'leri maskele, dış P2P IP'lere NAT Fix uygula)
         if !is_register {
-            packet.headers.retain(|h| h.name != HeaderName::Contact);
-            //[ARCH-COMPLIANCE]: B2BUA yerine P2P ve diğer çağrıları desteklemek için dinamik Contact.
-            let contact_val = format!("<sip:{}@{}:{}>", final_user, public_ip, public_port);
-            packet.headers.push(Header::new(HeaderName::Contact, contact_val));
+            let is_internal_contact = old_contact_val.contains("10.") || old_contact_val.contains("192.168.") || old_contact_val.contains("172.");
+            let is_external_src = !is_internal_ip(src_addr.ip());
+
+            if is_external_src {
+                // UAC'den geldi. NAT fix: Contact'ı public IP'sine çevir ki diğer UAC onu bulabilsin.
+                packet.headers.retain(|h| h.name != HeaderName::Contact);
+                let contact_val = format!("<sip:{}@{}:{}>", final_user, src_addr.ip(), src_addr.port());
+                packet.headers.push(Header::new(HeaderName::Contact, contact_val));
+            } else if is_internal_contact {
+                // İçeriden (Proxy/B2BUA) geldi ve Contact'ta iç IP var. 
+                // B2BUA topolojisini gizlemek için SBC Public IP'ye çevir.
+                packet.headers.retain(|h| h.name != HeaderName::Contact);
+                let contact_val = format!("<sip:{}@{}:{}>", final_user, public_ip, public_port);
+                packet.headers.push(Header::new(HeaderName::Contact, contact_val));
+            }
+            // Diğer durumda (içeriden geldi ve Contact zaten Public IP ise) dokunma!
+            // Bu, UAC'nin yanıtı Proxy'den geçip SBC'ye döndüğünde Contact'ın bozulmasını önler.
         }
         
         packet.headers.retain(|h| h.name != HeaderName::Server && h.name != HeaderName::UserAgent);
