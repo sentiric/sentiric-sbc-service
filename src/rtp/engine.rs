@@ -1,4 +1,4 @@
-// src/rtp/engine.rs
+// Dosya: sentiric-sip-sbc-service/src/rtp/engine.rs
 use std::sync::Arc;
 use tokio::net::UdpSocket;
 use dashmap::DashMap;
@@ -84,7 +84,7 @@ impl RtpEngine {
                             sip.call_id = %call_id_owned,
                             rtp.port = port,
                             error = %e,
-                            "🔥 [RTP-RELAY] Hata oluştu"
+                            "🔥[RTP-RELAY] Hata oluştu"
                         );
                     }
                     active_relays_clone.remove(&port);
@@ -128,7 +128,7 @@ impl RtpEngine {
 async fn run_relay_loop(port: u16, mut stop_signal: tokio::sync::broadcast::Receiver<()>, initial_peer: Option<SocketAddr>, call_id: &str) -> anyhow::Result<()> {
     let addr = format!("0.0.0.0:{}", port);
     let socket = UdpSocket::bind(&addr).await?;
-    let mut buf = [0u8; 2048];
+    let mut buf =[0u8; 2048];
     let mut peer_external = None;
     let mut peer_internal = None;
     let timeout = Duration::from_secs(60); 
@@ -140,7 +140,7 @@ async fn run_relay_loop(port: u16, mut stop_signal: tokio::sync::broadcast::Rece
         "🎧 RTP Relay soketi IP adresine bağlandı ve dinliyor."
     );
 
-    //[KRİTİK DÜZELTME]: Akıllı Peer Tanıma (Smart Routing & Latching)
+    // [KRİTİK DÜZELTME]: SIP Trunk ve Media Service Kararlılığı İçin Restore Edildi
     if let Some(target) = initial_peer {
         if is_internal_ip(target.ip()) {
             info!(
@@ -149,7 +149,7 @@ async fn run_relay_loop(port: u16, mut stop_signal: tokio::sync::broadcast::Rece
                 "🏢 İç Hedef (Media Service) tespit edildi. Latch tetikleyici dummy paket gönderiliyor."
             );
             peer_internal = Some(target);
-            // Media Service'in latch olması için geçerli bir 12 byte dummy RTP Header gönderiyoruz (4 byte hata verdiriyordu)
+            // SIP Trunk RTP kilitlenmesi için kritik dummy packet (Media Service'in Latch olması için)
             let dummy_rtp =[0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xDE, 0xAD, 0xBE, 0xEF];
             let _ = socket.send_to(&dummy_rtp, target).await;
         } else {
@@ -159,7 +159,7 @@ async fn run_relay_loop(port: u16, mut stop_signal: tokio::sync::broadcast::Rece
                 "🌍 Dış Hedef tespit edildi. Agresif NAT delme başlatılıyor..."
             );
             peer_external = Some(target);
-            let _ = socket.send_to(&[0u8; 4], target).await; // Dış dünya için 4 byte yeterli
+            let _ = socket.send_to(&[0u8; 4], target).await;
         }
     }
 
@@ -172,7 +172,7 @@ async fn run_relay_loop(port: u16, mut stop_signal: tokio::sync::broadcast::Rece
                         let is_internal = is_internal_ip(src.ip());
                         
                         if is_internal {
-                            // İÇERİDEN GELEN PAKET (Media Service -> SBC)
+                            // İÇERİDEN GELEN PAKET (Media Service VEYA İç Ağdaki P2P -> SBC)
                             if peer_internal != Some(src) {
                                 if !(is_docker_gateway(src.ip()) && peer_internal.is_some()) {
                                     info!(
@@ -182,7 +182,7 @@ async fn run_relay_loop(port: u16, mut stop_signal: tokio::sync::broadcast::Rece
                                         rtp.port = port,
                                         net.peer.ip = %src.ip(),
                                         net.peer.port = src.port(),
-                                        "🏢 [LATCH-INT] İç Bacak Kilitlendi"
+                                        "🏢[LATCH-INT] İç Bacak Kilitlendi"
                                     );
                                     peer_internal = Some(src);
                                 }
@@ -192,7 +192,7 @@ async fn run_relay_loop(port: u16, mut stop_signal: tokio::sync::broadcast::Rece
                                 let _ = socket.send_to(&buf[..len], dst).await; 
                             }
                         } else {
-                            // DIŞARIDAN GELEN PAKET (Telefon -> SBC)
+                            // DIŞARIDAN GELEN PAKET (PSTN/Trunk veya Dış UAC -> SBC)
                             if peer_external != Some(src) {
                                 info!(
                                     event = "RTP_LATCH_EXTERNAL",

@@ -10,7 +10,7 @@ use crate::sip::handlers::packet::PacketHandler;
 use crate::sip::handlers::media::MediaHandler;
 use tracing::{info, warn};
 
-// İç IP kontrolü (Proxy veya B2BUA trafiğini algılamak için)
+// İç IP kontrolü (Proxy, B2BUA veya Local P2P Client trafiğini algılamak için)
 fn is_internal_ip(ip: IpAddr) -> bool {
     match ip {
         IpAddr::V4(ipv4) => {
@@ -140,17 +140,17 @@ impl SbcEngine {
 
         // [ARCH-COMPLIANCE]: Akıllı Topoloji Gizleme (Sadece iç IP'leri maskele, dış P2P IP'lere NAT Fix uygula)
         if !is_register {
-            let is_internal_contact = old_contact_val.contains("10.") || old_contact_val.contains("192.168.") || old_contact_val.contains("172.");
+            let is_internal_contact = old_contact_val.contains("10.") || old_contact_val.contains("192.168.") || old_contact_val.contains("172.") || old_contact_val.contains("100.");
             let is_external_src = !is_internal_ip(src_addr.ip());
 
             if is_external_src {
-                // UAC'den geldi. NAT fix: Contact'ı public IP'sine çevir ki diğer UAC onu bulabilsin.
+                // UAC'den veya Dış Trunk'tan geldi. NAT fix: Contact'ı public IP'sine çevir ki diğer UAC onu bulabilsin.
                 packet.headers.retain(|h| h.name != HeaderName::Contact);
                 let contact_val = format!("<sip:{}@{}:{}>", final_user, src_addr.ip(), src_addr.port());
                 packet.headers.push(Header::new(HeaderName::Contact, contact_val));
             } else if is_internal_contact {
-                // İçeriden (Proxy/B2BUA) geldi ve Contact'ta iç IP var. 
-                // B2BUA topolojisini gizlemek için SBC Public IP'ye çevir.
+                // İçeriden (Proxy/B2BUA/Media) geldi ve Contact'ta iç IP var. 
+                // Topolojisini gizlemek için SBC Public IP'ye çevir.
                 packet.headers.retain(|h| h.name != HeaderName::Contact);
                 let contact_val = format!("<sip:{}@{}:{}>", final_user, public_ip, public_port);
                 packet.headers.push(Header::new(HeaderName::Contact, contact_val));
