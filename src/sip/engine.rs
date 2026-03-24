@@ -73,6 +73,10 @@ impl SbcEngine {
             SipRouter::fix_nat_via(&mut packet, src_addr);
             self.fix_request_uri_for_internal(&mut packet);
             
+            // [ARCH-COMPLIANCE] SBC MUST add its own Via header using its internal IP 
+            // to ensure responses trace back properly through the SBC.
+            SipRouter::add_via(&mut packet, &self.config.sip_internal_ip, self.config.sip_port, "UDP");
+            
             if !self.media.process_sdp(&mut packet).await { 
                 warn!(
                     event = "SIP_SDP_PROCESS_FAIL", 
@@ -138,25 +142,19 @@ impl SbcEngine {
         let rr_val = format!("<sip:{}:{};lr>", public_ip, public_port);
         packet.headers.insert(0, Header::new(HeaderName::RecordRoute, rr_val));
 
-        // [ARCH-COMPLIANCE]: Akıllı Topoloji Gizleme (Sadece iç IP'leri maskele, dış P2P IP'lere NAT Fix uygula)
         if !is_register {
             let is_internal_contact = old_contact_val.contains("10.") || old_contact_val.contains("192.168.") || old_contact_val.contains("172.") || old_contact_val.contains("100.");
             let is_external_src = !is_internal_ip(src_addr.ip());
 
             if is_external_src {
-                // UAC'den veya Dış Trunk'tan geldi. NAT fix: Contact'ı public IP'sine çevir ki diğer UAC onu bulabilsin.
                 packet.headers.retain(|h| h.name != HeaderName::Contact);
                 let contact_val = format!("<sip:{}@{}:{}>", final_user, src_addr.ip(), src_addr.port());
                 packet.headers.push(Header::new(HeaderName::Contact, contact_val));
             } else if is_internal_contact {
-                // İçeriden (Proxy/B2BUA/Media) geldi ve Contact'ta iç IP var. 
-                // Topolojisini gizlemek için SBC Public IP'ye çevir.
                 packet.headers.retain(|h| h.name != HeaderName::Contact);
                 let contact_val = format!("<sip:{}@{}:{}>", final_user, public_ip, public_port);
                 packet.headers.push(Header::new(HeaderName::Contact, contact_val));
             }
-            // Diğer durumda (içeriden geldi ve Contact zaten Public IP ise) dokunma!
-            // Bu, UAC'nin yanıtı Proxy'den geçip SBC'ye döndüğünde Contact'ın bozulmasını önler.
         }
         
         packet.headers.retain(|h| h.name != HeaderName::Server && h.name != HeaderName::UserAgent);
@@ -168,7 +166,7 @@ impl SbcEngine {
             sip.call_id = %call_id,
             advertise.ip = %public_ip,
             is_register = is_register,
-            "🛡️ [HARDENING] Yanıt maskelendi"
+            "🛡️[HARDENING] Yanıt maskelendi"
         );
     }
 
