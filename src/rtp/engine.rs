@@ -140,7 +140,6 @@ async fn run_relay_loop(port: u16, mut stop_signal: tokio::sync::broadcast::Rece
         "🎧 RTP Relay soketi IP adresine bağlandı ve dinliyor."
     );
 
-    // [KRİTİK DÜZELTME]: SIP Trunk ve Media Service Kararlılığı İçin Restore Edildi
     if let Some(target) = initial_peer {
         if is_internal_ip(target.ip()) {
             info!(
@@ -149,7 +148,7 @@ async fn run_relay_loop(port: u16, mut stop_signal: tokio::sync::broadcast::Rece
                 "🏢 İç Hedef (Media Service) tespit edildi. Latch tetikleyici dummy paket gönderiliyor."
             );
             peer_internal = Some(target);
-            // SIP Trunk RTP kilitlenmesi için kritik dummy packet (Media Service'in Latch olması için)
+            // [ARCH-COMPLIANCE]: Media Service Latching Bootstrapper
             let dummy_rtp =[0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xDE, 0xAD, 0xBE, 0xEF];
             let _ = socket.send_to(&dummy_rtp, target).await;
         } else {

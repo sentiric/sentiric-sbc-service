@@ -73,8 +73,8 @@ impl SbcEngine {
             SipRouter::fix_nat_via(&mut packet, src_addr);
             self.fix_request_uri_for_internal(&mut packet);
             
-            // [ARCH-COMPLIANCE] SBC MUST add its own Via header using its internal IP 
-            // to ensure responses trace back properly through the SBC.
+            // [ARCH-COMPLIANCE] Strict Routing Propagation: SBC kendi iç IP'sini Via'ya eklemeli ki
+            // B2BUA veya Proxy'den dönen yanıtlar karanlık NAT deliğine değil, SBC'ye ulaşsın.
             SipRouter::add_via(&mut packet, &self.config.sip_internal_ip, self.config.sip_port, "UDP");
             
             if !self.media.process_sdp(&mut packet).await { 
@@ -142,6 +142,7 @@ impl SbcEngine {
         let rr_val = format!("<sip:{}:{};lr>", public_ip, public_port);
         packet.headers.insert(0, Header::new(HeaderName::RecordRoute, rr_val));
 
+        //[ARCH-COMPLIANCE]: Akıllı Topoloji Gizleme (Sadece iç IP'leri maskele, dış P2P IP'lere NAT Fix uygula)
         if !is_register {
             let is_internal_contact = old_contact_val.contains("10.") || old_contact_val.contains("192.168.") || old_contact_val.contains("172.") || old_contact_val.contains("100.");
             let is_external_src = !is_internal_ip(src_addr.ip());
@@ -166,7 +167,7 @@ impl SbcEngine {
             sip.call_id = %call_id,
             advertise.ip = %public_ip,
             is_register = is_register,
-            "🛡️[HARDENING] Yanıt maskelendi"
+            "🛡️ [HARDENING] Yanıt maskelendi"
         );
     }
 
