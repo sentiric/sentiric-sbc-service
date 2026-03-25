@@ -123,18 +123,25 @@ impl App {
 
         let ctrl_c = async { tokio::signal::ctrl_c().await.expect("Ctrl+C dinleyicisi kurulamadı"); };
         
+        // [ARCH-COMPLIANCE] Çöken süreçler sessizce geçilmemeli, SUTS kuralına uygun şekilde raporlanmalıdır.
         tokio::select! {
             res = grpc_server_handle => {
                 let inner_res = res.context("gRPC sunucu görevi panic'ledi")?;
                 if let Err(e) = inner_res { return Err(e); }
                 error!(event = "UNEXPECTED_SHUTDOWN", "gRPC sunucusu beklenmedik şekilde sonlandı!");
             },
-            _res = http_server_handle => { },
-            _res = sip_handle => { },
-            _ = ctrl_c => {},
+            res = http_server_handle => { 
+                error!(event = "HTTP_SERVER_CRASH", result = ?res, "HTTP sunucu görevi çöktü.");
+            },
+            res = sip_handle => { 
+                error!(event = "SIP_SERVER_CRASH", result = ?res, "SIP sunucu görevi çöktü.");
+            },
+            _ = ctrl_c => {
+                warn!(event = "SIGINT_RECEIVED", "Kapatma sinyali (Ctrl+C) alındı.");
+            },
         }
 
-        warn!(event = "SYSTEM_SHUTDOWN", "Kapatma sinyali alındı. Graceful shutdown başlatılıyor...");
+        warn!(event = "SYSTEM_SHUTDOWN", "Graceful shutdown başlatılıyor...");
         let _ = shutdown_tx.send(()).await;
         let _ = sip_shutdown_tx.send(()).await;
         let _ = http_shutdown_tx.send(());

@@ -55,8 +55,11 @@ impl AppConfig {
         let rtp_start = env::var("SIP_SBC_RTP_START_PORT").unwrap_or_else(|_| "30000".to_string()).parse()?;
         let rtp_end = env::var("SIP_SBC_RTP_END_PORT").unwrap_or_else(|_| "30100".to_string()).parse()?;
 
-        //[ARCH-COMPLIANCE] tenant_isolation kuralı zorlaması. Eksikse panic/bail.
+        //[ARCH-COMPLIANCE] tenant_isolation kuralı zorlaması. Boş bırakılması YASAKTIR.
         let tenant_id = env::var("TENANT_ID").context("ZORUNLU: TENANT_ID çevre değişkeni eksik")?;
+        if tenant_id.trim().is_empty() {
+            anyhow::bail!("[ARCH-COMPLIANCE] TENANT_ID boş olamaz, hizmet başlatılamaz.");
+        }
 
         Ok(AppConfig {
             grpc_listen_addr: grpc_addr,

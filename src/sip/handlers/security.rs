@@ -1,7 +1,7 @@
 // src/sip/handlers/security.rs
 use dashmap::DashMap;
 use governor::{Quota, RateLimiter}; 
-use governor::state::{InMemoryState, NotKeyed};
+use governor::state::keyed::DefaultKeyedStateStore;
 use governor::clock::DefaultClock;
 use std::net::IpAddr;
 use std::sync::Arc;
@@ -9,14 +9,16 @@ use std::num::NonZeroU32;
 use tracing::{warn, info};
 
 pub struct SecurityHandler {
-    limiter: Arc<RateLimiter<NotKeyed, InMemoryState, DefaultClock>>,
+    // [DISCOVERY FIX] Global Rate Limiter yerine IP tabanlı (Keyed) Rate Limiter yapıldı
+    limiter: Arc<RateLimiter<IpAddr, DefaultKeyedStateStore<IpAddr>, DefaultClock>>,
     blacklist: DashMap<IpAddr, String>,
 }
 
 impl SecurityHandler {
     pub fn new(max_requests_per_second: u32) -> Self {
         let quota = Quota::per_second(NonZeroU32::new(max_requests_per_second).unwrap());
-        let limiter = Arc::new(RateLimiter::direct(quota));
+        // [DISCOVERY FIX] direct -> keyed
+        let limiter = Arc::new(RateLimiter::keyed(quota));
 
         Self {
             limiter,
@@ -31,12 +33,13 @@ impl SecurityHandler {
                 event = "SIP_ACCESS_DENIED",
                 net.src.ip = %ip,
                 reason = "blacklisted",
-                "🚫 [SBC-SEC] BLOCKED: Kaynak kara listede."
+                "🚫[SBC-SEC] BLOCKED: Kaynak kara listede."
             );
             return false;
         }
 
-        if self.limiter.check().is_err() {
+        // [DISCOVERY FIX] IP'yi baz alarak limit kontrolü
+        if self.limiter.check_key(&ip).is_err() {
             // [ARCH-COMPLIANCE] SUTS v4.0 Structured Log
             warn!(
                 event = "SIP_RATE_LIMITED",
