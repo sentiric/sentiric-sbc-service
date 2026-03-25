@@ -188,8 +188,20 @@ async fn run_relay_loop(port: u16, mut stop_signal: tokio::sync::broadcast::Rece
                             }
                             
                             if let Some(dst) = peer_external { 
-                                let _ = socket.send_to(&buf[..len], dst).await; 
+                                //[ARCH-COMPLIANCE] Hata Yutulması Engellendi
+                                if let Err(e) = socket.send_to(&buf[..len], dst).await {
+                                    tracing::warn!(
+                                        event = "RTP_UDP_SEND_ERROR",
+                                        sip.call_id = %call_id,
+                                        rtp.port = port,
+                                        net.dst.ip = %dst.ip(),
+                                        error = %e,
+                                        "RTP paketi hedefe (Dış) gönderilemedi."
+                                    );
+                                }
                             }
+
+
                         } else {
                             // DIŞARIDAN GELEN PAKET (PSTN/Trunk veya Dış UAC -> SBC)
                             if peer_external != Some(src) {
@@ -205,7 +217,17 @@ async fn run_relay_loop(port: u16, mut stop_signal: tokio::sync::broadcast::Rece
                                 peer_external = Some(src);
                             }
                             if let Some(dst) = peer_internal { 
-                                let _ = socket.send_to(&buf[..len], dst).await; 
+                                // [ARCH-COMPLIANCE] Hata Yutulması Engellendi
+                                if let Err(e) = socket.send_to(&buf[..len], dst).await {
+                                    tracing::warn!(
+                                        event = "RTP_UDP_SEND_ERROR",
+                                        sip.call_id = %call_id,
+                                        rtp.port = port,
+                                        net.dst.ip = %dst.ip(),
+                                        error = %e,
+                                        "RTP paketi hedefe (İç) gönderilemedi."
+                                    );
+                                }
                             }
                         }
                     }

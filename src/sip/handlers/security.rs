@@ -1,4 +1,4 @@
-// sentiric-sbc-service/src/sip/handlers/security.rs
+// src/sip/handlers/security.rs
 use dashmap::DashMap;
 use governor::{Quota, RateLimiter}; 
 use governor::state::{InMemoryState, NotKeyed};
@@ -26,12 +26,23 @@ impl SecurityHandler {
 
     pub fn check_access(&self, ip: IpAddr) -> bool {
         if self.blacklist.contains_key(&ip) {
-            warn!("🚫 [SBC-SEC] BLOCKED: Source {} is blacklisted", ip);
+            // [ARCH-COMPLIANCE] SUTS v4.0 Structured Log
+            warn!(
+                event = "SIP_ACCESS_DENIED",
+                net.src.ip = %ip,
+                reason = "blacklisted",
+                "🚫 [SBC-SEC] BLOCKED: Kaynak kara listede."
+            );
             return false;
         }
 
         if self.limiter.check().is_err() {
-            warn!("⏳ [SBC-SEC] THROTTLED: Rate limit from {}", ip);
+            // [ARCH-COMPLIANCE] SUTS v4.0 Structured Log
+            warn!(
+                event = "SIP_RATE_LIMITED",
+                net.src.ip = %ip,
+                "⏳[SBC-SEC] THROTTLED: IP adresi rate limit'e takıldı."
+            );
             return false;
         }
         true
@@ -39,6 +50,12 @@ impl SecurityHandler {
 
     pub fn ban(&self, ip: IpAddr, reason: &str) {
         self.blacklist.insert(ip, reason.to_string());
-        info!("⛔ [SBC-SEC] IP BANNED: {} - Reason: {}", ip, reason);
+        //[ARCH-COMPLIANCE] SUTS v4.0 Structured Log
+        info!(
+            event = "SIP_IP_BANNED",
+            net.src.ip = %ip,
+            reason = %reason,
+            "⛔ [SBC-SEC] IP BANNED: Kaynak banlandı."
+        );
     }
 }

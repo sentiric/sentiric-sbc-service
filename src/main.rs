@@ -1,7 +1,6 @@
 // sentiric-sbc-service/src/main.rs
 use anyhow::{Context, Result};
 use sentiric_sip_sbc_service::app::App;
-use std::process;
 
 fn main() -> Result<()> {
     let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -9,13 +8,8 @@ fn main() -> Result<()> {
         .build()
         .context("Tokio runtime oluşturulamadı")?;
 
+    //[ARCH-COMPLIANCE] ARCH-005: `eprintln!` kullanımı yasak olduğu için Result propagasyonu yapıldı.
     runtime.block_on(async {
-        match App::bootstrap().await {
-            Ok(app) => app.run().await,
-            Err(e) => {
-                eprintln!("Kritik Hata: Uygulama başlatılamadı: {:?}", e);
-                process::exit(1);
-            }
-        }
+        App::bootstrap().await?.run().await
     })
 }

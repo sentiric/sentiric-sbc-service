@@ -13,7 +13,6 @@ use dashmap::DashMap;
 
 pub const DEFAULT_SIP_PORT: u16 = 5060;
 
-// [SRE & ARCH-COMPLIANCE] DNS çözünürlük hatalarına karşı önbellek (Resilience)
 pub struct DnsCache {
     cache: DashMap<String, (SocketAddr, Instant)>,
 }
@@ -24,14 +23,12 @@ impl DnsCache {
     }
 
     pub async fn resolve(&self, hostname: &str) -> Option<SocketAddr> {
-        // Eğer IP adresi verilmişse direkt dön
         if let Ok(addr) = hostname.parse::<SocketAddr>() {
             return Some(addr);
         }
 
         let now = Instant::now();
         
-        // 1. Önbellekte var mı ve 60 saniyeden yeni mi?
         if let Some(cached) = self.cache.get(hostname) {
             let (addr, timestamp) = *cached;
             if now.duration_since(timestamp) < Duration::from_secs(60) {
@@ -39,20 +36,17 @@ impl DnsCache {
             }
         }
 
-        // 2. [MİMARİ DÜZELTME]: DNS Cold Start Koruması (Exponential Backoff)
-        // gRPC bunu kendi içinde yapıyor ama UDP SIP sunucumuz manuel yapmalı.
-        // Consul DNS'in anında yanıt veremediği ilk saniyelerde paketi düşürmemek için
-        // 100ms -> 200ms -> 400ms -> 800ms -> 1600ms şeklinde bekleyerek tekrar dener.
         let mut backoff = 100;
         for attempt in 1..=5 {
-            match tokio::net::lookup_host(hostname).await {
-                Ok(mut addrs) => {
+            // [ARCH-COMPLIANCE] timeouts Kuralı: Explicit DNS Lookup Timeout eklendi (500ms limit).
+            match tokio::time::timeout(Duration::from_millis(500), tokio::net::lookup_host(hostname)).await {
+                Ok(Ok(mut addrs)) => {
                     if let Some(addr) = addrs.next() {
                         self.cache.insert(hostname.to_string(), (addr, now));
                         return Some(addr);
                     }
                 }
-                Err(e) => {
+                Ok(Err(e)) => {
                     tracing::debug!(
                         event="DNS_RETRY", 
                         attempt=attempt, 
@@ -61,12 +55,19 @@ impl DnsCache {
                         "DNS çözümü gecikti, tekrar deneniyor..."
                     );
                 }
+                Err(_) => {
+                    tracing::warn!(
+                        event="DNS_TIMEOUT", 
+                        attempt=attempt, 
+                        host=%hostname, 
+                        "DNS çözümü 500ms timeout süresini aştı."
+                    );
+                }
             }
             tokio::time::sleep(Duration::from_millis(backoff)).await;
             backoff *= 2; 
         }
 
-        // 3. Ağ hatası devam ediyorsa "Stale Cache" (Bayat Veri) kullan
         if let Some(cached) = self.cache.get(hostname) {
             warn!(
                 event="DNS_STALE_FALLBACK", 

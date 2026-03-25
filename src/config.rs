@@ -5,7 +5,7 @@ use std::net::SocketAddr;
 
 #[derive(Debug, Clone)]
 pub struct AppConfig {
-   pub grpc_listen_addr: SocketAddr,
+    pub grpc_listen_addr: SocketAddr,
     pub http_listen_addr: SocketAddr,
     
     pub sip_bind_ip: String,
@@ -21,12 +21,15 @@ pub struct AppConfig {
     pub rtp_start_port: u16,
     pub rtp_end_port: u16,
 
-    pub node_hostname: String, // YENİ: Fiziksel sunucu adı
+    pub node_hostname: String,
 
     pub env: String,
     pub rust_log: String,
-    pub log_format: String, // [YENİ] Log formatı (json/text)
+    pub log_format: String,
     pub service_version: String,
+
+    //[ARCH-COMPLIANCE] tenant_isolation kuralı gereği eklendi.
+    pub tenant_id: String,
 
     pub cert_path: String,
     pub key_path: String,
@@ -52,7 +55,10 @@ impl AppConfig {
         let rtp_start = env::var("SIP_SBC_RTP_START_PORT").unwrap_or_else(|_| "30000".to_string()).parse()?;
         let rtp_end = env::var("SIP_SBC_RTP_END_PORT").unwrap_or_else(|_| "30100".to_string()).parse()?;
 
-       Ok(AppConfig {
+        //[ARCH-COMPLIANCE] tenant_isolation kuralı zorlaması. Eksikse panic/bail.
+        let tenant_id = env::var("TENANT_ID").context("ZORUNLU: TENANT_ID çevre değişkeni eksik")?;
+
+        Ok(AppConfig {
             grpc_listen_addr: grpc_addr,
             http_listen_addr: http_addr, 
             
@@ -69,16 +75,15 @@ impl AppConfig {
             rtp_start_port: rtp_start,
             rtp_end_port: rtp_end,
 
-            node_hostname: env::var("NODE_HOSTNAME").unwrap_or_else(|_| "localhost".to_string()), // YENİ
+            node_hostname: env::var("NODE_HOSTNAME").unwrap_or_else(|_| "localhost".to_string()),
             
             env: env::var("ENV").unwrap_or_else(|_| "production".to_string()),
             rust_log: env::var("RUST_LOG").unwrap_or_else(|_| "info".to_string()),
-            log_format: env::var("LOG_FORMAT").unwrap_or_else(|_| "text".to_string()), // [YENİ]
+            log_format: env::var("LOG_FORMAT").unwrap_or_else(|_| "text".to_string()),
 
-            // [DÜZELTME]: Versiyonu derleme zamanında Cargo.toml'dan al (SUTS Resource Compliance)
             service_version: env!("CARGO_PKG_VERSION").to_string(),
+            tenant_id,
             
-            // Certs
             cert_path: env::var("SIP_SBC_SERVICE_CERT_PATH").context("ZORUNLU: CERT PATH")?,
             key_path: env::var("SIP_SBC_SERVICE_KEY_PATH").context("ZORUNLU: KEY PATH")?,
             ca_path: env::var("GRPC_TLS_CA_PATH").context("ZORUNLU: GRPC_TLS_CA_PATH")?,

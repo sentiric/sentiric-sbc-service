@@ -35,24 +35,23 @@ impl App {
         dotenvy::dotenv().ok();
         let config = Arc::new(AppConfig::load_from_env().context("Konfigürasyon dosyası yüklenemedi")?);
 
-        // --- SUTS v4.0 LOGGING SETUP ---
         let rust_log_env = env::var("RUST_LOG").unwrap_or_else(|_| config.rust_log.clone());
         let env_filter = EnvFilter::try_from_default_env().or_else(|_| EnvFilter::try_new(&rust_log_env))?;
         let subscriber = Registry::default().with(env_filter);
         
         if config.log_format == "json" {
+            // [ARCH-COMPLIANCE] Dinamik tenant_id formatöre iletiliyor
             let suts_formatter = SutsFormatter::new(
                 "sip-sbc-service".to_string(),
                 config.service_version.clone(),
                 config.env.clone(),
                 config.node_hostname.clone(),
+                config.tenant_id.clone(), 
             );
             subscriber.with(fmt::layer().event_format(suts_formatter)).init();
         } else {
-            // Development Mode (Pretty Print)
             subscriber.with(fmt::layer().compact()).init();
         }
-        // -------------------------------
 
         info!(
             event = "SYSTEM_STARTUP",
@@ -70,14 +69,12 @@ impl App {
         let (sip_shutdown_tx, sip_shutdown_rx) = mpsc::channel(1);
         let (http_shutdown_tx, http_shutdown_rx) = tokio::sync::oneshot::channel();
 
-        // --- SIP Sunucusunu Başlat ---
         let sip_config = self.config.clone();
         let sip_server = SipServer::new(sip_config).await?;
         let sip_handle = tokio::spawn(async move {
             sip_server.run(sip_shutdown_rx).await;
         });
 
-        // --- gRPC Sunucusunu Başlat ---
         let grpc_config = self.config.clone();
         let grpc_server_handle = tokio::spawn(async move {
             let tls_config = load_server_tls_config(&grpc_config).await.expect("TLS yapılandırması başarısız");
@@ -100,7 +97,6 @@ impl App {
                 .context("gRPC sunucusu hatayla sonlandı")
         });
 
-        // --- HTTP Sunucusunu Başlat (Health Check) ---
         let http_config = self.config.clone();
         let http_server_handle = tokio::spawn(async move {
             let addr = http_config.http_listen_addr;
