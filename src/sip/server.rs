@@ -135,7 +135,13 @@ impl SipServer {
                             match parser::parse(&buf[..len]) {
                                 Ok(packet) => {
                                     let call_id = packet.get_header_value(HeaderName::CallId).cloned().unwrap_or_default();
-                                    let method = packet.method.as_str();
+                                    
+                                    //[ARCH-COMPLIANCE] TYPE FIX: status_code is u16 natively.
+                                    let method = if packet.is_request() { 
+                                        packet.method.as_str().to_string() 
+                                    } else { 
+                                        format!("RESPONSE/{}", packet.status_code) 
+                                    };
 
                                     if packet.is_request && packet.method == Method::Invite {
                                         let trying_packet = SipResponseFactory::create_100_trying(&packet);
@@ -206,7 +212,13 @@ impl SipServer {
             let full_payload = String::from_utf8_lossy(&packet_bytes).to_string(); 
             
             let call_id = packet.get_header_value(HeaderName::CallId).cloned().unwrap_or_default();
-            let method = packet.method.as_str();
+            
+            // [ARCH-COMPLIANCE] TYPE FIX
+            let method = if packet.is_request() { 
+                packet.method.as_str().to_string() 
+            } else { 
+                format!("RESPONSE/{}", packet.status_code) 
+            };
 
             info!(
                 event = "SIP_EGRESS_FULL",
