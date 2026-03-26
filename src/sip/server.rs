@@ -130,8 +130,8 @@ impl SipServer {
                                     if packet.is_request && packet.method == Method::Invite {
                                         let trying_packet = SipResponseFactory::create_100_trying(&packet);
                                         let trying_bytes = trying_packet.to_bytes();
-                                        
-                                        info!(
+                                        // [ARCH-COMPLIANCE] INFO yerine DEBUG yapıldı. Disk I/O tasarrufu!                                        
+                                        debug!(
                                             event = "SIP_EGRESS",
                                             sip.call_id = %call_id,
                                             sip.method = "100",
@@ -206,7 +206,8 @@ impl SipServer {
                 format!("RESPONSE/{}", packet.status_code) 
             };
 
-            info!(
+            // [ARCH-COMPLIANCE] INFO yerine DEBUG yapıldı. Disk I/O tasarrufu!
+            debug!(
                 event = "SIP_EGRESS_FULL",
                 sip.call_id = %call_id,
                 sip.method = %method,
