@@ -144,6 +144,7 @@ async fn run_relay_loop(port: u16, mut stop_signal: tokio::sync::broadcast::Rece
         if is_internal_ip(target.ip()) {
             info!(
                 event="RTP_PRE_LATCH", 
+                sip.call_id = %call_id, // <--- EKLENDİ
                 target=%target, 
                 "🏢 İç Hedef (Media Service) tespit edildi. Latch tetikleyici dummy paket gönderiliyor."
             );
@@ -154,6 +155,7 @@ async fn run_relay_loop(port: u16, mut stop_signal: tokio::sync::broadcast::Rece
         } else {
             info!(
                 event="RTP_HOLE_PUNCH_INIT", 
+                sip.call_id = %call_id, // <--- EKLENDİ
                 target=%target, 
                 "🌍 Dış Hedef tespit edildi. Agresif NAT delme başlatılıyor..."
             );

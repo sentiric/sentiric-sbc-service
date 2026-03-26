@@ -17,18 +17,18 @@ pub struct DnsCache {
     cache: DashMap<String, (SocketAddr, Instant)>,
 }
 
+// [ARCH-COMPLIANCE] resolve fonksiyonu call_id argümanı alacak şekilde güncellendi.
 impl DnsCache {
     pub fn new() -> Self {
         Self { cache: DashMap::new() }
     }
 
-    pub async fn resolve(&self, hostname: &str) -> Option<SocketAddr> {
+    pub async fn resolve(&self, hostname: &str, call_id: &str) -> Option<SocketAddr> {
         if let Ok(addr) = hostname.parse::<SocketAddr>() {
             return Some(addr);
         }
 
         let now = Instant::now();
-        
         if let Some(cached) = self.cache.get(hostname) {
             let (addr, timestamp) = *cached;
             if now.duration_since(timestamp) < Duration::from_secs(60) {
@@ -38,7 +38,6 @@ impl DnsCache {
 
         let mut backoff = 100;
         for attempt in 1..=5 {
-            // [ARCH-COMPLIANCE] timeouts Kuralı: Explicit DNS Lookup Timeout eklendi (500ms limit).
             match tokio::time::timeout(Duration::from_millis(500), tokio::net::lookup_host(hostname)).await {
                 Ok(Ok(mut addrs)) => {
                     if let Some(addr) = addrs.next() {
@@ -47,21 +46,10 @@ impl DnsCache {
                     }
                 }
                 Ok(Err(e)) => {
-                    tracing::debug!(
-                        event="DNS_RETRY", 
-                        attempt=attempt, 
-                        host=%hostname, 
-                        error=%e, 
-                        "DNS çözümü gecikti, tekrar deneniyor..."
-                    );
+                    tracing::debug!(event="DNS_RETRY", sip.call_id=%call_id, attempt=attempt, host=%hostname, error=%e, "DNS çözümü gecikti, tekrar deneniyor...");
                 }
                 Err(_) => {
-                    tracing::warn!(
-                        event="DNS_TIMEOUT", 
-                        attempt=attempt, 
-                        host=%hostname, 
-                        "DNS çözümü 500ms timeout süresini aştı."
-                    );
+                    tracing::warn!(event="DNS_TIMEOUT", sip.call_id=%call_id, attempt=attempt, host=%hostname, "DNS çözümü 500ms timeout süresini aştı.");
                 }
             }
             tokio::time::sleep(Duration::from_millis(backoff)).await;
@@ -69,15 +57,11 @@ impl DnsCache {
         }
 
         if let Some(cached) = self.cache.get(hostname) {
-            warn!(
-                event="DNS_STALE_FALLBACK", 
-                host=%hostname, 
-                "⚠️ DNS ağdan çözümlenemedi (Discovery kapalı olabilir), önbellekteki eski IP adresi kullanılıyor."
-            );
+            warn!(event="DNS_STALE_FALLBACK", sip.call_id=%call_id, host=%hostname, "⚠️ DNS ağdan çözümlenemedi (Discovery kapalı olabilir), önbellekteki eski IP adresi kullanılıyor.");
             return Some(cached.0);
         }
         
-        error!(event="DNS_FATAL", host=%hostname, "❌ DNS çözümlenemedi ve önbellekte kayıt yok!");
+        error!(event="DNS_FATAL", sip.call_id=%call_id, host=%hostname, "❌ DNS çözümlenemedi ve önbellekte kayıt yok!");
         None
     }
 }
@@ -189,7 +173,9 @@ impl SipServer {
     }
 
     async fn route_packet(&self, packet: &mut SipPacket, src_addr: SocketAddr) {
-        let proxy_addr_opt = self.dns_cache.resolve(&self.config.proxy_sip_addr).await;
+        let call_id = packet.get_header_value(HeaderName::CallId).cloned().unwrap_or_default();
+        // [ARCH-COMPLIANCE] resolve işlemine call_id aktarıldı
+        let proxy_addr_opt = self.dns_cache.resolve(&self.config.proxy_sip_addr, &call_id).await;
 
         let target_addr = if packet.is_request() {
             if let Some(proxy_addr) = proxy_addr_opt {
