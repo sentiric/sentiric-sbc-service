@@ -10,7 +10,6 @@ use crate::sip::handlers::packet::PacketHandler;
 use crate::sip::handlers::media::MediaHandler;
 use tracing::{info, warn};
 
-// İç IP kontrolü (Proxy, B2BUA veya Local P2P Client trafiğini algılamak için)
 fn is_internal_ip(ip: IpAddr) -> bool {
     match ip {
         IpAddr::V4(ipv4) => {
@@ -51,51 +50,40 @@ impl SbcEngine {
         let call_id = packet.get_header_value(HeaderName::CallId).cloned().unwrap_or_default();
 
         if !self.security.check_access(src_addr.ip()) { 
-            warn!(
-                event = "SIP_ACCESS_DENIED",
-                sip.call_id = %call_id,
-                net.src.ip = %src_addr.ip(),
-                "Erişim reddedildi (Rate Limit veya Blocklist)"
-            );
+            warn!(event = "SIP_ACCESS_DENIED", sip.call_id = %call_id, net.src.ip = %src_addr.ip(), "Erişim reddedildi (Rate Limit veya Blocklist)");
             return SipAction::Drop; 
         }
         
         if packet.is_request() {
             if !PacketHandler::sanitize(&packet) { 
-                warn!(
-                    event = "SIP_SANITIZATION_FAILED", 
-                    sip.call_id = %call_id, 
-                    "Paket temizliği başarısız (User-Agent/Malform)"
-                );
+                warn!(event = "SIP_SANITIZATION_FAILED", sip.call_id = %call_id, "Paket temizliği başarısız (User-Agent/Malform)");
                 return SipAction::Drop; 
             }
             
             SipRouter::fix_nat_via(&mut packet, src_addr);
             self.fix_request_uri_for_internal(&mut packet);
             
-            // [ARCH-COMPLIANCE] Strict Routing Propagation: SBC kendi iç IP'sini Via'ya eklemeli ki
-            // B2BUA veya Proxy'den dönen yanıtlar karanlık NAT deliğine değil, SBC'ye ulaşsın.
             SipRouter::add_via(&mut packet, &self.config.sip_internal_ip, self.config.sip_port, "UDP");
             
+            //[ARCH-COMPLIANCE] Container NAT Router Fix:
+            // Proxy'den dönecek yanıtların karanlık uzaya (Node IP) düşmemesi için
+            // rport parametresi eklenir. Proxy bu sayede yanıtı fiziksel Container Socket'ine fırlatır.
+            if let Some(via) = packet.headers.first_mut() {
+                if via.name == HeaderName::Via && !via.value.contains("rport") {
+                    via.value.push_str(";rport");
+                }
+            }
+            
             if !self.media.process_sdp(&mut packet).await { 
-                warn!(
-                    event = "SIP_SDP_PROCESS_FAIL", 
-                    sip.call_id = %call_id, 
-                    "SDP işlenemedi, paket düşürülüyor"
-                );
+                warn!(event = "SIP_SDP_PROCESS_FAIL", sip.call_id = %call_id, "SDP işlenemedi, paket düşürülüyor");
                 return SipAction::Drop; 
             }
         } 
         
         if packet.is_response() {
             if !self.media.process_sdp(&mut packet).await { 
-                warn!(
-                    event = "SIP_RESPONSE_SDP_FAIL",
-                    sip.call_id = %call_id,
-                    "⚠️ Yanıt paketi SDP işlenemedi (Medya bacağı eksik olabilir)"
-                );
+                warn!(event = "SIP_RESPONSE_SDP_FAIL", sip.call_id = %call_id, "⚠️ Yanıt paketi SDP işlenemedi (Medya bacağı eksik olabilir)");
             }
-            
             self.apply_smart_topology_hiding(&mut packet, src_addr);
         }
 
@@ -142,7 +130,6 @@ impl SbcEngine {
         let rr_val = format!("<sip:{}:{};lr>", public_ip, public_port);
         packet.headers.insert(0, Header::new(HeaderName::RecordRoute, rr_val));
 
-        //[ARCH-COMPLIANCE]: Akıllı Topoloji Gizleme (Sadece iç IP'leri maskele, dış P2P IP'lere NAT Fix uygula)
         if !is_register {
             let is_internal_contact = old_contact_val.contains("10.") || old_contact_val.contains("192.168.") || old_contact_val.contains("172.") || old_contact_val.contains("100.");
             let is_external_src = !is_internal_ip(src_addr.ip());
