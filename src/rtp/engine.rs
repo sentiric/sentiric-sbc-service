@@ -181,7 +181,10 @@ async fn run_relay_loop(
                 "🌍 Dış Hedef tespit edildi. Agresif NAT delme başlatılıyor..."
             );
             peer_external = Some(target);
-            let _ = socket.send_to(&[0u8; 4], target).await;
+            // [ARCH-COMPLIANCE] CRITICAL BUG FIX: Operatörlere 4 byte çöp atmak RTP portlarını bloke eder (Ses gelmez/Çat sesi yapar).
+            // Bunun yerine 12 byte'lık tamamen sessiz, formatı doğru standart bir RTP paketi atılmalıdır.
+            let dummy_rtp = [0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xDE, 0xAD, 0xBE, 0xEF];
+            let _ = socket.send_to(&dummy_rtp, target).await;
         }
     }
 
