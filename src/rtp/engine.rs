@@ -125,12 +125,34 @@ impl RtpEngine {
     }
 }
 
-async fn run_relay_loop(port: u16, mut stop_signal: tokio::sync::broadcast::Receiver<()>, initial_peer: Option<SocketAddr>, call_id: &str) -> anyhow::Result<()> {
+async fn run_relay_loop(
+    port: u16, 
+    mut stop_signal: tokio::sync::broadcast::Receiver<()>, 
+    initial_peer: Option<SocketAddr>, 
+    call_id: &str
+) -> anyhow::Result<()> {
     let addr = format!("0.0.0.0:{}", port);
     let socket = UdpSocket::bind(&addr).await?;
-    let mut buf =[0u8; 2048];
-    let mut peer_external = None;
-    let mut peer_internal = None;
+    let mut buf = [0u8; 2048];
+    
+    // =========================================================================
+    // [ARCH-COMPLIANCE] MİMARİ KARAR: "STRICT SYMMETRIC LATCHING" (Kesin Kilit)
+    // =========================================================================
+    // SORUN: Geleneksel latching mantığı (peer != src koşulu), karşı makinenin
+    // hem RTP (Ses, örn: port 50010) hem de RTCP (Kontrol, örn: port 50012)
+    // paketlerini art arda göndermesi durumunda sürekli port değiştirmeye
+    // ("Port Flapping") neden oluyordu. Bu da sesin kesilmesine yol açar.
+    //
+    // ÇÖZÜM: IP adresi değişmediği sürece (Media Server Failover hariç),
+    // farklı bir porttan (RTCP) gelen paketlere izin verilir ancak HEDEF
+    // kilitlenmiş ana RTP portundan KESİNLİKLE saptırılmaz. 
+    // =========================================================================
+    let mut peer_external: Option<SocketAddr> = None;
+    let mut external_latched = false; 
+    
+    let mut peer_internal: Option<SocketAddr> = None;
+    let mut internal_latched = false; 
+    
     let timeout = Duration::from_secs(60); 
     
     debug!(
@@ -144,18 +166,17 @@ async fn run_relay_loop(port: u16, mut stop_signal: tokio::sync::broadcast::Rece
         if is_internal_ip(target.ip()) {
             info!(
                 event="RTP_PRE_LATCH", 
-                sip.call_id = %call_id, // <--- EKLENDİ
+                sip.call_id = %call_id,
                 target=%target, 
                 "🏢 İç Hedef (Media Service) tespit edildi. Latch tetikleyici dummy paket gönderiliyor."
             );
             peer_internal = Some(target);
-            // [ARCH-COMPLIANCE]: Media Service Latching Bootstrapper
-            let dummy_rtp =[0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xDE, 0xAD, 0xBE, 0xEF];
+            let dummy_rtp = [0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xDE, 0xAD, 0xBE, 0xEF];
             let _ = socket.send_to(&dummy_rtp, target).await;
         } else {
             info!(
                 event="RTP_HOLE_PUNCH_INIT", 
-                sip.call_id = %call_id, // <--- EKLENDİ
+                sip.call_id = %call_id,
                 target=%target, 
                 "🌍 Dış Hedef tespit edildi. Agresif NAT delme başlatılıyor..."
             );
@@ -173,26 +194,42 @@ async fn run_relay_loop(port: u16, mut stop_signal: tokio::sync::broadcast::Rece
                         let is_internal = is_internal_ip(src.ip());
                         
                         if is_internal {
-                            // İÇERİDEN GELEN PAKET (Media Service VEYA İç Ağdaki P2P -> SBC)
-                            if peer_internal != Some(src) {
-                                if !(is_docker_gateway(src.ip()) && peer_internal.is_some()) {
-                                    info!(
-                                        event = "RTP_LATCH_INTERNAL",
-                                        trace_id = %call_id,
-                                        sip.call_id = %call_id,
-                                        rtp.port = port,
-                                        net.peer.ip = %src.ip(),
-                                        net.peer.port = src.port(),
-                                        "🏢[LATCH-INT] İç Bacak Kilitlendi"
-                                    );
-                                    peer_internal = Some(src);
+                            // ------------------------------------------------
+                            // İÇERİDEN GELEN PAKET (Media Service -> SBC)
+                            // ------------------------------------------------
+                            let is_docker_gw = is_docker_gateway(src.ip());
+                            
+                            let should_latch = match peer_internal {
+                                None => !is_docker_gw,
+                                Some(curr) => {
+                                    if !internal_latched && !is_docker_gw {
+                                        true // SDP tahmini bitti, gerçek paketle kalıcı kilit
+                                    } else if curr.ip() != src.ip() && !is_docker_gw {
+                                        true // Media Service IP'si değişti (Container Failover vs)
+                                    } else {
+                                        false // Aynı IP'den RTCP/farklı port geldi. FLAP ENGELLENDİ!
+                                    }
                                 }
+                            };
+
+                            if should_latch {
+                                info!(
+                                    event = "RTP_LATCH_INTERNAL",
+                                    trace_id = %call_id,
+                                    sip.call_id = %call_id,
+                                    rtp.port = port,
+                                    net.peer.ip = %src.ip(),
+                                    net.peer.port = src.port(),
+                                    "🏢[LATCH-INT] İç Bacak Kesin Olarak Kilitlendi (Strict Latch)"
+                                );
+                                peer_internal = Some(src);
+                                internal_latched = true;
                             }
                             
+                            // Medyayı Dışarıya Gönder
                             if let Some(dst) = peer_external { 
-                                //[ARCH-COMPLIANCE] Hata Yutulması Engellendi
                                 if let Err(e) = socket.send_to(&buf[..len], dst).await {
-                                    tracing::warn!(
+                                    warn!(
                                         event = "RTP_UDP_SEND_ERROR",
                                         sip.call_id = %call_id,
                                         rtp.port = port,
@@ -203,10 +240,24 @@ async fn run_relay_loop(port: u16, mut stop_signal: tokio::sync::broadcast::Rece
                                 }
                             }
 
-
                         } else {
-                            // DIŞARIDAN GELEN PAKET (PSTN/Trunk veya Dış UAC -> SBC)
-                            if peer_external != Some(src) {
+                            // ------------------------------------------------
+                            // DIŞARIDAN GELEN PAKET (UAC / Trunk -> SBC)
+                            // ------------------------------------------------
+                            let should_latch = match peer_external {
+                                None => true,
+                                Some(curr) => {
+                                    if !external_latched {
+                                        true
+                                    } else if curr.ip() != src.ip() {
+                                        true // Dış kullanıcının IP'si değişti (Network handover / 4G)
+                                    } else {
+                                        false // Aynı dış IP'den farklı port geldi (RTCP). FLAP ENGELLENDİ!
+                                    }
+                                }
+                            };
+
+                            if should_latch {
                                 info!(
                                     event = "RTP_LATCH_EXTERNAL",
                                     trace_id = %call_id,
@@ -214,14 +265,16 @@ async fn run_relay_loop(port: u16, mut stop_signal: tokio::sync::broadcast::Rece
                                     rtp.port = port,
                                     net.peer.ip = %src.ip(),
                                     net.peer.port = src.port(),
-                                    "🌍[LATCH-EXT] Dış Bacak Kilitlendi! (SES GELİYOR)"
+                                    "🌍[LATCH-EXT] Dış Bacak Kesin Olarak Kilitlendi! (SES GELİYOR)"
                                 );
                                 peer_external = Some(src);
+                                external_latched = true;
                             }
+                            
+                            // Medyayı İçeriye Gönder
                             if let Some(dst) = peer_internal { 
-                                // [ARCH-COMPLIANCE] Hata Yutulması Engellendi
                                 if let Err(e) = socket.send_to(&buf[..len], dst).await {
-                                    tracing::warn!(
+                                    warn!(
                                         event = "RTP_UDP_SEND_ERROR",
                                         sip.call_id = %call_id,
                                         rtp.port = port,
@@ -243,10 +296,11 @@ async fn run_relay_loop(port: u16, mut stop_signal: tokio::sync::broadcast::Rece
                             "⌛ RTP Relay zaman aşımına uğradı."
                         );
                         break;
-                    },
+                    }
                 }
             }
         }
-    }
+    } // loop kapaması eklendi (Önceki hatanın sebebi burasıydı)
+
     Ok(())
 }
