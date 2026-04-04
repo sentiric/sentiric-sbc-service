@@ -22,9 +22,15 @@ impl From<ServiceError> for Status {
     fn from(err: ServiceError) -> Self {
         match err {
             ServiceError::GrpcStatus(s) => s,
-            ServiceError::SipRejected(msg) => Status::permission_denied(format!("SIP Trafiği Reddedildi: {}", msg)),
-            ServiceError::GrpcTransportError(e) => Status::unavailable(format!("gRPC bağlantı hatası: {}", e)),
-            ServiceError::GrpcClientError(msg) => Status::internal(format!("gRPC istemci tarafı hatası: {}", msg)),
+            ServiceError::SipRejected(msg) => {
+                Status::permission_denied(format!("SIP Trafiği Reddedildi: {}", msg))
+            }
+            ServiceError::GrpcTransportError(e) => {
+                Status::unavailable(format!("gRPC bağlantı hatası: {}", e))
+            }
+            ServiceError::GrpcClientError(msg) => {
+                Status::internal(format!("gRPC istemci tarafı hatası: {}", msg))
+            }
             _ => Status::internal(format!("{:#?}", err)),
         }
     }

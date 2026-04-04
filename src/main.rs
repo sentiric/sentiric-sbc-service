@@ -9,7 +9,5 @@ fn main() -> Result<()> {
         .context("Tokio runtime oluşturulamadı")?;
 
     //[ARCH-COMPLIANCE] ARCH-005: `eprintln!` kullanımı yasak olduğu için Result propagasyonu yapıldı.
-    runtime.block_on(async {
-        App::bootstrap().await?.run().await
-    })
+    runtime.block_on(async { App::bootstrap().await?.run().await })
 }

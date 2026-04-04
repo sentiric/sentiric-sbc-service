@@ -1,21 +1,31 @@
 // Dosya: sentiric-sip-sbc-service/src/rtp/engine.rs
-use std::sync::Arc;
-use tokio::net::UdpSocket;
 use dashmap::DashMap;
-use std::net::{SocketAddr, IpAddr};
-use std::time::Duration;
-use tracing::{info, error, warn, debug}; 
 use rand::Rng;
+use std::net::{IpAddr, SocketAddr};
+use std::sync::Arc;
+use std::time::Duration;
+use tokio::net::UdpSocket;
+use tracing::{debug, error, info, warn};
 
 fn is_internal_ip(ip: IpAddr) -> bool {
     match ip {
         IpAddr::V4(ipv4) => {
             let octets = ipv4.octets();
-            if octets[0] == 10 && octets[1] == 88 && octets[3] == 1 { return true; } 
-            if octets[0] == 10 || octets[0] == 127 { return true; }
-            if octets[0] == 172 && (octets[1] >= 16 && octets[1] <= 31) { return true; }
-            if octets[0] == 192 && octets[1] == 168 { return true; }
-            if octets[0] == 100 && (octets[1] >= 64 && octets[1] <= 127) { return true; }
+            if octets[0] == 10 && octets[1] == 88 && octets[3] == 1 {
+                return true;
+            }
+            if octets[0] == 10 || octets[0] == 127 {
+                return true;
+            }
+            if octets[0] == 172 && (octets[1] >= 16 && octets[1] <= 31) {
+                return true;
+            }
+            if octets[0] == 192 && octets[1] == 168 {
+                return true;
+            }
+            if octets[0] == 100 && (octets[1] >= 64 && octets[1] <= 127) {
+                return true;
+            }
             false
         }
         IpAddr::V6(ipv6) => ipv6.is_loopback(),
@@ -50,21 +60,33 @@ impl RtpEngine {
         }
     }
 
-    pub async fn get_or_allocate_relay(&self, call_id: &str, initial_peer: Option<SocketAddr>) -> Option<u16> {
+    pub async fn get_or_allocate_relay(
+        &self,
+        call_id: &str,
+        initial_peer: Option<SocketAddr>,
+    ) -> Option<u16> {
         if let Some(entry) = self.call_id_map.get(call_id) {
             return Some(*entry.value());
         }
-        
+
         let mut rng = rand::thread_rng();
-        for _ in 0..1000 { 
+        for _ in 0..1000 {
             let port = rng.gen_range(self.start_port..=self.end_port);
-            let port = if port % 2 != 0 { port.saturating_add(1) } else { port };
-            if port > self.end_port { continue; }
+            let port = if port % 2 != 0 {
+                port.saturating_add(1)
+            } else {
+                port
+            };
+            if port > self.end_port {
+                continue;
+            }
 
             if !self.active_relays.contains_key(&port) {
                 let (tx, _) = tokio::sync::broadcast::channel(1);
-                let relay = RtpRelay { stop_signal: tx.clone() };
-                
+                let relay = RtpRelay {
+                    stop_signal: tx.clone(),
+                };
+
                 let active_relays_clone = self.active_relays.clone();
                 let call_id_map_clone = self.call_id_map.clone();
                 let call_id_owned = call_id.to_string();
@@ -73,12 +95,14 @@ impl RtpEngine {
                 tokio::spawn(async move {
                     info!(
                         event = "RTP_RELAY_STARTED",
-                        sip.call_id = %call_id_owned, 
+                        sip.call_id = %call_id_owned,
                         rtp.port = port,
                         "🚀[RTP-RELAY] Başlatıldı"
                     );
-                    
-                    if let Err(e) = run_relay_loop(port, stop_rx, initial_peer, &call_id_owned).await {
+
+                    if let Err(e) =
+                        run_relay_loop(port, stop_rx, initial_peer, &call_id_owned).await
+                    {
                         error!(
                             event = "RTP_RELAY_ERROR",
                             sip.call_id = %call_id_owned,
@@ -96,7 +120,7 @@ impl RtpEngine {
                 return Some(port);
             }
         }
-        
+
         warn!(
             event = "RTP_PORT_EXHAUSTED",
             trace_id = %call_id,
@@ -110,7 +134,7 @@ impl RtpEngine {
         if let Some((_, port)) = self.call_id_map.remove(call_id) {
             if let Some((_, relay)) = self.active_relays.remove(&port) {
                 let _ = relay.stop_signal.send(());
-                
+
                 info!(
                     event = "RTP_RELAY_RELEASED",
                     trace_id = %call_id,
@@ -126,15 +150,15 @@ impl RtpEngine {
 }
 
 async fn run_relay_loop(
-    port: u16, 
-    mut stop_signal: tokio::sync::broadcast::Receiver<()>, 
-    initial_peer: Option<SocketAddr>, 
-    call_id: &str
+    port: u16,
+    mut stop_signal: tokio::sync::broadcast::Receiver<()>,
+    initial_peer: Option<SocketAddr>,
+    call_id: &str,
 ) -> anyhow::Result<()> {
     let addr = format!("0.0.0.0:{}", port);
     let socket = UdpSocket::bind(&addr).await?;
     let mut buf = [0u8; 2048];
-    
+
     // =========================================================================
     // [ARCH-COMPLIANCE] MİMARİ KARAR: "STRICT SYMMETRIC LATCHING" (Kesin Kilit)
     // =========================================================================
@@ -145,16 +169,16 @@ async fn run_relay_loop(
     //
     // ÇÖZÜM: IP adresi değişmediği sürece (Media Server Failover hariç),
     // farklı bir porttan (RTCP) gelen paketlere izin verilir ancak HEDEF
-    // kilitlenmiş ana RTP portundan KESİNLİKLE saptırılmaz. 
+    // kilitlenmiş ana RTP portundan KESİNLİKLE saptırılmaz.
     // =========================================================================
     let mut peer_external: Option<SocketAddr> = None;
-    let mut external_latched = false; 
-    
+    let mut external_latched = false;
+
     let mut peer_internal: Option<SocketAddr> = None;
-    let mut internal_latched = false; 
-    
-    let timeout = Duration::from_secs(60); 
-    
+    let mut internal_latched = false;
+
+    let timeout = Duration::from_secs(60);
+
     debug!(
         event = "RTP_SOCKET_BOUND",
         sip.call_id = %call_id,
@@ -165,24 +189,24 @@ async fn run_relay_loop(
     if let Some(target) = initial_peer {
         if is_internal_ip(target.ip()) {
             info!(
-                event="RTP_PRE_LATCH", 
+                event="RTP_PRE_LATCH",
                 sip.call_id = %call_id,
-                target=%target, 
+                target=%target,
                 "🏢 İç Hedef tespit edildi. Sinyal bekleniyor."
             );
             peer_internal = Some(target);
             // SİLİNDİ: dummy rtp gönderimi
         } else {
             info!(
-                event="RTP_PRE_LATCH", 
+                event="RTP_PRE_LATCH",
                 sip.call_id = %call_id,
-                target=%target, 
+                target=%target,
                 "🌍 Dış Hedef tespit edildi. Sinyal bekleniyor."
             );
             peer_external = Some(target);
-            // [ARCH-COMPLIANCE] CRITICAL FIX: Dış ağlara (Özellikle Operatör Trunk'larına) 
-            // sahte/çöp (dummy) RTP paketi atmak YASAKTIR. Bu işlem operatör DSP'lerini çökertir 
-            // (Çat sesi) ve çağrının güvenlik nedeniyle düşürülmesine neden olur. 
+            // [ARCH-COMPLIANCE] CRITICAL FIX: Dış ağlara (Özellikle Operatör Trunk'larına)
+            // sahte/çöp (dummy) RTP paketi atmak YASAKTIR. Bu işlem operatör DSP'lerini çökertir
+            // (Çat sesi) ve çağrının güvenlik nedeniyle düşürülmesine neden olur.
             // NAT delme işlemini 'media-service' yasal paketlerle kendisi halleder.
         }
     }
@@ -194,13 +218,13 @@ async fn run_relay_loop(
                 match res {
                     Ok(Ok((len, src))) => {
                         let is_internal = is_internal_ip(src.ip());
-                        
+
                         if is_internal {
                             // ------------------------------------------------
                             // İÇERİDEN GELEN PAKET (Media Service -> SBC)
                             // ------------------------------------------------
                             let is_docker_gw = is_docker_gateway(src.ip());
-                            
+
                             let should_latch = match peer_internal {
                                 None => !is_docker_gw,
                                 Some(curr) => {
@@ -227,9 +251,9 @@ async fn run_relay_loop(
                                 peer_internal = Some(src);
                                 internal_latched = true;
                             }
-                            
+
                             // Medyayı Dışarıya Gönder
-                            if let Some(dst) = peer_external { 
+                            if let Some(dst) = peer_external {
                                 if let Err(e) = socket.send_to(&buf[..len], dst).await {
                                     warn!(
                                         event = "RTP_UDP_SEND_ERROR",
@@ -272,9 +296,9 @@ async fn run_relay_loop(
                                 peer_external = Some(src);
                                 external_latched = true;
                             }
-                            
+
                             // Medyayı İçeriye Gönder
-                            if let Some(dst) = peer_internal { 
+                            if let Some(dst) = peer_internal {
                                 if let Err(e) = socket.send_to(&buf[..len], dst).await {
                                     warn!(
                                         event = "RTP_UDP_SEND_ERROR",
